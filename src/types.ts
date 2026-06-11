@@ -3,7 +3,8 @@ export interface Prices {
   doubleGustoBurger: number;
   halloumiBurger: number;
   doubleHalloumiBurger: number;
-  pommes: number;
+  pommes: number; // Fries to Burger extra (3€)
+  pommesEinzeln: number; // Fries standalone (4€)
   linsensuppe: number;
   gulaschsuppe: number;
   sorbet: number;
@@ -21,7 +22,7 @@ export interface MenuItem {
 }
 
 export interface Category {
-  id: 'burger' | 'suppen' | 'sorbet';
+  id: 'burger' | 'suppen' | 'sorbet' | 'beilagen';
   name: string;
   icon: string;
   color: string;
