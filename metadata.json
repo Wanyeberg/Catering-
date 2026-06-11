@@ -1,0 +1,6 @@
+{
+  "name": "Catering Overlay",
+  "description": "Ein modernes, fuer das iPad optimiertes Catering-Overlay zur schnellen Erfassung von Bestellungen und Umsaetzen.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
