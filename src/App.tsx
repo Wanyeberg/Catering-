@@ -13,9 +13,12 @@ import {
   ChevronRight,
   ArrowLeft,
   ShoppingBag,
-  Info
+  Info,
+  FileDown
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { jsPDF } from 'jspdf';
+import autoTable from 'jspdf-autotable';
 import { PRICES, ITEM_NAMES, CATEGORIES } from './constants';
 import { ItemKey, OrderStats } from './types';
 
@@ -107,6 +110,53 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('catering_artist_statistics_v1', JSON.stringify(artistCounts));
   }, [artistCounts]);
+
+  const [startingCash, setStartingCash] = useState<number>(() => {
+    const saved = localStorage.getItem('catering_starting_cash_v1');
+    return saved ? parseFloat(saved) || 0 : 0;
+  });
+
+  useEffect(() => {
+    localStorage.setItem('catering_starting_cash_v1', startingCash.toString());
+  }, [startingCash]);
+
+  // Active orders in the slider queue (persisted in localStorage)
+  const [activeOrders, setActiveOrders] = useState<{ id: string; orderNumber: number; items: CartItem[]; totalAmount: number; timestamp: string }[]>(() => {
+    const saved = localStorage.getItem('catering_active_orders_v2');
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {
+        console.error("Error loading active orders", e);
+      }
+    }
+    return [];
+  });
+
+  useEffect(() => {
+    localStorage.setItem('catering_active_orders_v2', JSON.stringify(activeOrders));
+  }, [activeOrders]);
+
+  // Sequential order number tracker (persisted in localStorage)
+  const [nextOrderNumber, setNextOrderNumber] = useState<number>(() => {
+    const saved = localStorage.getItem('catering_next_order_num_v2');
+    return saved ? parseInt(saved, 10) || 1 : 1;
+  });
+
+  useEffect(() => {
+    localStorage.setItem('catering_next_order_num_v2', nextOrderNumber.toString());
+  }, [nextOrderNumber]);
+
+  // Track if we are currently editing an existing order
+  const [editingOrderId, setEditingOrderId] = useState<string | null>(null);
+
+  // Change calculator popup states
+  const [showChangeModal, setShowChangeModal] = useState<boolean>(false);
+  const [amountPaid, setAmountPaid] = useState<string>('');
+
+  // Pending confirm states to avoid blocked browser window.confirm inside iframe
+  const [pendingCancelOrderId, setPendingCancelOrderId] = useState<string | null>(null);
+  const [backButtonConfirmActive, setBackButtonConfirmActive] = useState<boolean>(false);
 
   // Toast notifier animation helper
   const addToast = (message: string, submessage?: string, type: 'success' | 'info' | 'reset' = 'success') => {
@@ -201,20 +251,78 @@ export default function App() {
   // CLEAR CURRENT WORKING CART
   const clearCart = () => {
     setCart([]);
+    setEditingOrderId(null);
     addToast("Liste geleert", "Die temporäre Bestellliste wurde zurückgesetzt", "info");
   };
 
-  // SUBMIT BASKET TO SALES TOTALS (Confirm & Save order)
+  // SUBMIT BASKET TO ACTIVE QUEUE (Confirm & Save order)
   const finalizeOrder = () => {
     if (cart.length === 0) {
       addToast("Bestellliste leer", "Bitte fügen Sie zuerst Speisen hinzu", "info");
       return;
     }
 
+    const totalAmount = cart.reduce((sum, item) => {
+      const singlePrice = item.price + (item.hasPommes ? PRICES.pommes : 0);
+      return sum + singlePrice * item.quantity;
+    }, 0);
+
+    if (editingOrderId) {
+      // Editing an existing order
+      const ordNum = activeOrders.find(o => o.id === editingOrderId)?.orderNumber || 0;
+      setActiveOrders((prev) =>
+        prev.map((order) => {
+          if (order.id === editingOrderId) {
+            return {
+              ...order,
+              items: [...cart],
+              totalAmount
+            };
+          }
+          return order;
+        })
+      );
+      addToast("Bestellung geändert", `Änderungen an Bestellung #${ordNum} gespeichert`, "success");
+      setEditingOrderId(null);
+    } else {
+      // Placed a brand new order!
+      const now = new Date();
+      const timeString = now.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
+
+      const newOrder = {
+        id: Date.now().toString(),
+        orderNumber: nextOrderNumber,
+        items: [...cart],
+        totalAmount,
+        timestamp: timeString
+      };
+
+      setActiveOrders((prev) => [...prev, newOrder]);
+      setNextOrderNumber((prev) => prev + 1);
+      addToast("Bestellung gespeichert", `Bestellung #${newOrder.orderNumber} eingereiht!`, "success");
+    }
+
+    // Display order validation feedback screen
+    setShowChangeModal(false);
+    setOrderSuccessAnimation(true);
+    setTimeout(() => {
+      setOrderSuccessAnimation(false);
+      // Empty basket and route back to the pristine Start page
+      setCart([]);
+      setIsArtistActive(false);
+      setCurrentScreen('start');
+    }, 1200);
+  };
+
+  // COMPLETE ORDER FROM SLIDER - Accumulates sale counts and closes order
+  const completeOrder = (orderId: string) => {
+    const orderToComplete = activeOrders.find((o) => o.id === orderId);
+    if (!orderToComplete) return;
+
     // Accumulate temporary items list into permanent stats
     setCounts((prevStats) => {
       const nextStats = { ...prevStats };
-      cart.forEach((item) => {
+      orderToComplete.items.forEach((item) => {
         if (!item.isArtist) {
           // Increment primary dish
           nextStats[item.key] = (nextStats[item.key] || 0) + item.quantity;
@@ -229,7 +337,7 @@ export default function App() {
 
     setArtistCounts((prevStats) => {
       const nextStats = { ...prevStats };
-      cart.forEach((item) => {
+      orderToComplete.items.forEach((item) => {
         if (item.isArtist) {
           // Increment primary dish
           nextStats[item.key] = (nextStats[item.key] || 0) + item.quantity;
@@ -242,15 +350,52 @@ export default function App() {
       return nextStats;
     });
 
-    // Display order validation feedback screen
-    setOrderSuccessAnimation(true);
-    setTimeout(() => {
-      setOrderSuccessAnimation(false);
-      // Empty basket and route back to the pristine Start page
-      setCart([]);
-      setIsArtistActive(false);
-      setCurrentScreen('start');
-    }, 1800);
+    // Remove from active queue
+    setActiveOrders((prev) => prev.filter((o) => o.id !== orderId));
+    addToast("Bestellung abgeschlossen", `Bestellung #${orderToComplete.orderNumber} beendet & gebucht!`, "success");
+  };
+
+  // EDIT ORDER FROM SLIDER - Loads items into the active cart for modifications
+  const editOrder = (orderId: string) => {
+    const orderToEdit = activeOrders.find((o) => o.id === orderId);
+    if (!orderToEdit) return;
+
+    setEditingOrderId(orderId);
+    setCart([...orderToEdit.items]);
+    
+    // Set active category to match first item category of edited order
+    if (orderToEdit.items.length > 0) {
+      const firstKey = orderToEdit.items[0].key;
+      const cat = CATEGORIES.find(c => c.items.some(i => i.key === firstKey));
+      if (cat) {
+        setActiveCategory(cat.id);
+      }
+    }
+
+    setCurrentScreen('ordering');
+    addToast("Bearbeitungsmodus", `Bestellung #${orderToEdit.orderNumber} geladen`, "info");
+  };
+
+  // CANCEL ORDER FROM SLIDER - Removes it entirely from active orders queue
+  const cancelOrderInQueue = (orderId: string) => {
+    const order = activeOrders.find(o => o.id === orderId);
+    if (!order) return;
+    
+    if (pendingCancelOrderId === orderId) {
+      // Confirmed, delete now
+      setActiveOrders((prev) => prev.filter((o) => o.id !== orderId));
+      addToast("Gelöscht", `Bestellung #${order.orderNumber} wurde gelöscht`, "info");
+      setPendingCancelOrderId(null);
+    } else {
+      // Set to pending
+      setPendingCancelOrderId(orderId);
+      addToast("Zum Löschen bestätigen", `Klicke noch einmal auf 'Stornieren', um Bestellung #${order.orderNumber} zu löschen`, "info");
+      
+      // Auto-cancel confirmation state after 4 seconds
+      setTimeout(() => {
+        setPendingCancelOrderId((current) => current === orderId ? null : current);
+      }, 4000);
+    }
   };
 
   // Reset entire POS memory database
@@ -271,6 +416,9 @@ export default function App() {
     setArtistCounts(cleared);
     setCart([]);
     setIsArtistActive(false);
+    setActiveOrders([]); // reset active queue
+    setNextOrderNumber(1); // reset sequence
+    setEditingOrderId(null);
     setShowResetConfirmation(false);
     setShowStats(false);
     addToast("System Zurückgesetzt", "Sämtliche akkumulierten Zählerstände wurden auf Null gesetzt", "reset");
@@ -282,6 +430,254 @@ export default function App() {
       style: 'currency',
       currency: 'EUR'
     }).format(amount);
+  };
+
+  // Export cumulative sales and statistics report to a beautiful PDF
+  const exportToPDF = () => {
+    try {
+      const doc = new jsPDF({
+        orientation: 'p',
+        unit: 'mm',
+        format: 'a4'
+      });
+
+      // Page configuration helper variables
+      const pageWidth = doc.internal.pageSize.width || 210;
+      
+      // Color scheme
+      const primaryColor: [number, number, number] = [15, 23, 42]; // Slate 900
+      
+      // Title
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(22);
+      doc.setTextColor(primaryColor[0], primaryColor[1], primaryColor[2]);
+      doc.text("GGG X HELL'S KITCHEN", pageWidth / 2, 20, { align: 'center' });
+      
+      doc.setFontSize(14);
+      doc.setTextColor(100, 116, 139); // Slate 500
+      doc.text("Verkaufsübersicht & Kassenbericht", pageWidth / 2, 28, { align: 'center' });
+      
+      doc.setFontSize(9);
+      doc.setFont('helvetica', 'normal');
+      const nowString = new Date().toLocaleString('de-DE', {
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit'
+      });
+      doc.text(`Erstellt am: ${nowString}`, pageWidth / 2, 34, { align: 'center' });
+
+      // Horizontal separator line
+      doc.setDrawColor(226, 232, 240); // Slate 200
+      doc.setLineWidth(0.5);
+      doc.line(15, 38, pageWidth - 15, 38);
+
+      // Section: Key Metrics Summary
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(11);
+      doc.setTextColor(primaryColor[0], primaryColor[1], primaryColor[2]);
+      doc.text("KASSEN- UND UMSATZSTATISTIK", 15, 45);
+
+      const metricsRows = [
+        ["Startkassenbestand", formatEuro(startingCash)],
+        ["Gesamtumsatz (Standard)", formatEuro(regularTotalRevenue)],
+        ["Gesamtumsatz (Artists)", formatEuro(artistTotalRevenue)],
+        ["Umsatzerlöse (Alle)", formatEuro(permanentTotalRevenue)],
+        ["Soll-Kassenbestand (Endbestand)", formatEuro(startingCash + permanentTotalRevenue)],
+        ["Posten Gesamt Verkauft", `${permanentTotalSold} Stück`]
+      ];
+
+      autoTable(doc, {
+        startY: 48,
+        head: [['Kennzahl', 'Betrag / Wert']],
+        body: metricsRows,
+        theme: 'striped',
+        headStyles: {
+          fillColor: primaryColor,
+          textColor: [255, 255, 255],
+          fontStyle: 'bold',
+          fontSize: 10
+        },
+        bodyStyles: {
+          font: 'helvetica',
+          fontSize: 9,
+          textColor: [51, 65, 85]
+        },
+        columnStyles: {
+          0: { cellWidth: 110 },
+          1: { cellWidth: 70, halign: 'right', fontStyle: 'bold' }
+        },
+        margin: { left: 15, right: 15 }
+      });
+
+      let currentY = (doc as any).lastAutoTable.finalY + 12;
+
+      // Section: Standard item details list
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(11);
+      doc.setTextColor(primaryColor[0], primaryColor[1], primaryColor[2]);
+      doc.text("STANDARD - ARTIKELVERKÄUFE", 15, currentY);
+
+      const standardSalesRows = Object.entries(counts)
+        .filter(([_, count]) => (count as number) > 0)
+        .map(([key, count]) => {
+          const typedKey = key as ItemKey;
+          const price = PRICES[typedKey] || 0;
+          const total = (count as number) * price;
+          return [
+            ITEM_NAMES[typedKey] || typedKey,
+            formatEuro(price),
+            `${count}x`,
+            formatEuro(total)
+          ];
+        });
+
+      if (standardSalesRows.length === 0) {
+        doc.setFont('helvetica', 'italic');
+        doc.setFontSize(9);
+        doc.setTextColor(148, 163, 184); // Slate 400
+        doc.text("Keine Standard-Verkäufe gebucht.", 15, currentY + 6);
+        currentY += 12;
+      } else {
+        autoTable(doc, {
+          startY: currentY + 3,
+          head: [['Artikelname', 'Einzelpreis', 'Menge', 'Subtotal']],
+          body: standardSalesRows,
+          theme: 'striped',
+          headStyles: {
+            fillColor: [79, 70, 229], // Indigo 600
+            textColor: [255, 255, 255],
+            fontStyle: 'bold',
+            fontSize: 9
+          },
+          bodyStyles: {
+            font: 'helvetica',
+            fontSize: 8.5,
+            textColor: [51, 65, 85]
+          },
+          columnStyles: {
+            0: { cellWidth: 80 },
+            1: { cellWidth: 35, halign: 'right' },
+            2: { cellWidth: 25, halign: 'center' },
+            3: { cellWidth: 40, halign: 'right', fontStyle: 'bold' }
+          },
+          margin: { left: 15, right: 15 }
+        });
+        currentY = (doc as any).lastAutoTable.finalY + 12;
+      }
+
+      // Check if we have enough space for the artist table, otherwise slide to page 2 automatically
+      if (currentY > 230) {
+        doc.addPage();
+        currentY = 20;
+      }
+
+      // Section: Artist item details list
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(11);
+      doc.setTextColor(primaryColor[0], primaryColor[1], primaryColor[2]);
+      doc.text("ARTIST - ARTIKELVERKÄUFE", 15, currentY);
+
+      const artistSalesRows = Object.entries(artistCounts)
+        .filter(([_, count]) => (count as number) > 0)
+        .map(([key, count]) => {
+          const typedKey = key as ItemKey;
+          const price = PRICES[typedKey] || 0;
+          const total = (count as number) * price;
+          return [
+            ITEM_NAMES[typedKey] || typedKey,
+            formatEuro(price),
+            `${count}x`,
+            formatEuro(total)
+          ];
+        });
+
+      if (artistSalesRows.length === 0) {
+        doc.setFont('helvetica', 'italic');
+        doc.setFontSize(9);
+        doc.setTextColor(148, 163, 184); // Slate 400
+        doc.text("Keine Artist-Verkäufe gebucht.", 15, currentY + 6);
+      } else {
+        autoTable(doc, {
+          startY: currentY + 3,
+          head: [['Artikelname', 'Einzelpreis', 'Menge', 'Subtotal']],
+          body: artistSalesRows,
+          theme: 'striped',
+          headStyles: {
+            fillColor: [217, 119, 6], // Amber 600
+            textColor: [255, 255, 255],
+            fontStyle: 'bold',
+            fontSize: 9
+          },
+          bodyStyles: {
+            font: 'helvetica',
+            fontSize: 8.5,
+            textColor: [51, 65, 85]
+          },
+          columnStyles: {
+            0: { cellWidth: 80 },
+            1: { cellWidth: 35, halign: 'right' },
+            2: { cellWidth: 25, halign: 'center' },
+            3: { cellWidth: 40, halign: 'right', fontStyle: 'bold' }
+          },
+          margin: { left: 15, right: 15 }
+        });
+      }
+
+      // PDF Page footer indicator (e.g. Generated on date)
+      const pageCount = (doc as any).internal.getNumberOfPages();
+      for (let i = 1; i <= pageCount; i++) {
+        doc.setPage(i);
+        doc.setFontSize(7.5);
+        doc.setTextColor(148, 163, 184);
+        doc.text(
+          `Gastro-Kassensystem • Seite ${i} von ${pageCount}`,
+          pageWidth / 2,
+          287,
+          { align: 'center' }
+        );
+      }
+
+      // Trigger standard save/download dialog
+      const formattedDate = new Date().toISOString().split('T')[0];
+      doc.save(`verkaufsbericht_hells_kitchen_${formattedDate}.pdf`);
+      addToast("PDF exportiert", "Der Verkaufsbericht wurde erfolgreich als PDF exportiert.", "success");
+    } catch (error) {
+      console.error("PDF Export error:", error);
+      addToast("Export fehlgeschlagen", "Fehler beim Erzeugenden der PDF-Datei.", "info");
+    }
+  };
+
+  // Change Breakdown helper for high POS precision
+  const getChangeBreakdown = (change: number) => {
+    if (change <= 0) return [];
+    let remaining = Math.round(change * 100);
+    const denominations = [
+      { value: 5000, label: '50 € Schein' },
+      { value: 2000, label: '20 € Schein' },
+      { value: 1000, label: '10 € Schein' },
+      { value: 500, label: '5 € Schein' },
+      { value: 200, label: '2 € Münze' },
+      { value: 100, label: '1 € Münze' },
+      { value: 50, label: '50 ct Münze' },
+      { value: 20, label: '20 ct Münze' },
+      { value: 10, label: '10 ct Münze' },
+      { value: 5, label: '5 ct Münze' },
+      { value: 2, label: '2 ct Münze' },
+      { value: 1, label: '1 ct Münze' }
+    ];
+    
+    const result: { value: number; label: string; count: number }[] = [];
+    for (const denom of denominations) {
+      if (remaining >= denom.value) {
+        const count = Math.floor(remaining / denom.value);
+        result.push({ value: denom.value / 100, label: denom.label, count });
+        remaining %= denom.value;
+      }
+    }
+    return result;
   };
 
   // Calculate live total revenue from permanent storage
@@ -316,12 +712,9 @@ export default function App() {
       {/* GLOBAL TELEMETRY BAR HEADER */}
       <header className="h-20 bg-white border-b border-gray-200 px-8 flex items-center justify-between shrink-0 shadow-xs z-30">
         <div className="flex items-center gap-4">
-          <div className="w-11 h-11 bg-indigo-600 rounded-xl flex items-center justify-center text-white font-black text-2xl shadow-xs">
-            J
-          </div>
           <div>
-            <h1 className="text-2xl font-black tracking-tight text-slate-900 select-none">
-              Jürgens Catering Zauber ✨
+            <h1 className="text-2xl font-black tracking-tight text-slate-900 select-none flex items-center gap-2">
+              <span>🌟</span>GGG X HELL‘S KITCHEN<span>👺</span>
             </h1>
           </div>
         </div>
@@ -357,8 +750,126 @@ export default function App() {
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 1.02 }}
               transition={{ duration: 0.2 }}
-              className="absolute inset-0 p-8 flex flex-col justify-center items-center max-w-6xl w-full mx-auto"
+              className="absolute inset-0 p-6 md:p-8 flex flex-col justify-start md:justify-center items-center max-w-6xl w-full mx-auto overflow-y-auto"
             >
+              {/* SLIDER / QUEUE FOR ACTIVE PLACED ORDERS */}
+              <div id="active-orders-slider-container" className="w-full max-w-5xl px-4 mb-8 select-none">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <span className="flex h-2.5 w-2.5 relative">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75"></span>
+                      <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-indigo-500"></span>
+                    </span>
+                    <h2 className="text-xs uppercase font-extrabold tracking-widest text-slate-500 flex items-center gap-1.5">
+                      <span>📋</span> Aktive Bestellungen ({activeOrders.length})
+                    </h2>
+                  </div>
+                  {activeOrders.length > 0 && (
+                    <span className="text-[11px] text-indigo-500 font-bold animate-pulse">
+                      👉 Scroll nach rechts für weitere Bestellungen
+                    </span>
+                  )}
+                </div>
+
+                {activeOrders.length === 0 ? (
+                  <div className="bg-white/80 rounded-2xl p-6 text-center border-2 border-dashed border-slate-200 text-slate-400 shadow-3xs">
+                    <p className="text-xs font-bold text-slate-600">Noch keine aktiven Bestellungen.</p>
+                  </div>
+                ) : (
+                  <div className="flex overflow-x-auto gap-4 pb-3 pt-1 snap-x no-scrollbar" style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }}>
+                    {activeOrders.map((order) => {
+                      const hasArtist = order.items.some(item => item.isArtist);
+                      
+                      return (
+                        <div
+                          id={`order-card-${order.id}`}
+                          key={order.id}
+                          className={`snap-start shrink-0 w-80 bg-white rounded-3xl border p-4 shadow-sm hover:shadow-md transition duration-200 flex flex-col justify-between ${
+                            hasArtist ? 'border-amber-300 bg-amber-50/15' : 'border-gray-200'
+                          }`}
+                        >
+                          {/* Card Header */}
+                          <div className="flex items-center justify-between border-b border-dashed border-slate-100 pb-2 mb-3">
+                            <div className="flex items-center gap-1.5">
+                              <span className="bg-slate-900 text-white font-black text-xs px-2 py-0.5 rounded-lg font-mono">
+                                #{order.orderNumber}
+                              </span>
+                              {hasArtist && (
+                                <span className="bg-amber-100 text-amber-800 text-[9px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-md">
+                                  Artist
+                                </span>
+                              )}
+                            </div>
+                            <span className="text-xs font-bold text-slate-400 font-mono flex items-center gap-1">
+                              🕒 {order.timestamp}
+                            </span>
+                          </div>
+
+                          {/* Card Items List */}
+                          <div className="space-y-1.5 flex-1 overflow-y-auto max-h-32 pr-1 mb-4">
+                            {order.items.map((item, idx) => (
+                              <div key={idx} className="flex justify-between items-start text-xs font-sans">
+                                <div className="text-slate-800 font-bold leading-tight flex-1">
+                                  <span className="text-indigo-600 font-black mr-1">{item.quantity}x</span>
+                                  <span>{item.name}</span>
+                                  {item.hasPommes && (
+                                    <span className="block text-[10px] font-extrabold text-indigo-500">
+                                      🍟 inkl. Pommes
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+
+                          {/* Card Footer Balance & Action Panel */}
+                          <div>
+                            <div className="flex justify-between items-center mb-3 pt-2 border-t border-slate-100">
+                              <span className="text-[10px] uppercase font-bold tracking-widest text-slate-400">Summe</span>
+                              <span className="font-mono font-black text-sm text-slate-900">
+                                {formatEuro(order.totalAmount)}
+                              </span>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-2">
+                              {/* Edit triggers editOrder */}
+                              <button
+                                onClick={() => editOrder(order.id)}
+                                className="py-2 px-3 border border-slate-200 hover:border-slate-350 hover:bg-slate-50 text-xs font-black text-slate-700 rounded-xl transition active:scale-95 flex items-center justify-center gap-1 cursor-pointer"
+                              >
+                                ✏️ Bearbeiten
+                              </button>
+
+                              {/* Complete triggers completeOrder */}
+                              <button
+                                onClick={() => completeOrder(order.id)}
+                                className="py-2 px-3 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black rounded-xl transition shadow-xs hover:shadow-md active:scale-95 flex items-center justify-center gap-1 cursor-pointer"
+                              >
+                                ✓ Erledigt
+                              </button>
+                            </div>
+                            
+                            {/* Cancel completely option */}
+                            <button
+                              onClick={() => cancelOrderInQueue(order.id)}
+                              className={`w-full text-center mt-2.5 text-[10px] font-semibold transition cursor-pointer ${
+                                pendingCancelOrderId === order.id
+                                  ? 'text-rose-600 font-extrabold underline animate-pulse'
+                                  : 'text-slate-400 hover:text-red-500 hover:underline'
+                              }`}
+                            >
+                              {pendingCancelOrderId === order.id
+                                ? '⚠️ Bestätigen: Wirklich löschen?'
+                                : 'Stornieren (Löschen)'}
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
               {/* FOUR ICONIC BULK BUTTONS */}
               <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-6 w-full max-w-5xl px-4 select-none">
                 
@@ -438,18 +949,29 @@ export default function App() {
                   id="back-to-home-btn"
                   onClick={() => {
                     if (cart.length > 0) {
-                      if (confirm("Bestellliste enthält bereits Posten. Wirklich zurückgehen und aktuelle Liste verwerfen?")) {
+                      if (backButtonConfirmActive) {
                         setCart([]);
+                        setBackButtonConfirmActive(false);
                         setCurrentScreen('start');
+                      } else {
+                        setBackButtonConfirmActive(true);
+                        addToast("Zurückgehen?", "Klicke noch einmal, um die aktuelle Bestellliste zu verwerfen.", "info");
+                        setTimeout(() => {
+                          setBackButtonConfirmActive(false);
+                        }, 4000);
                       }
                     } else {
                       setCurrentScreen('start');
                     }
                   }}
-                  className="px-4 py-2 text-slate-600 hover:text-slate-900 font-bold text-xs flex items-center gap-1.5 hover:bg-slate-100 rounded-lg transition active:scale-95 cursor-pointer shrink-0"
+                  className={`px-4 py-2 font-bold text-xs flex items-center gap-1.5 rounded-lg transition active:scale-95 cursor-pointer shrink-0 ${
+                    backButtonConfirmActive
+                      ? 'bg-rose-50 text-rose-600 hover:bg-rose-100'
+                      : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+                  }`}
                 >
                   <ArrowLeft className="w-4 h-4" />
-                  <span>Zurück</span>
+                  <span>{backButtonConfirmActive ? 'Sicher verwerfen?' : 'Zurück'}</span>
                 </button>
 
                 {/* Left-aligned control stack: Category pills and Artists toggle cleanly aligned next to Back button */}
@@ -509,14 +1031,14 @@ export default function App() {
                   <button
                     id="artist-mode-toggle"
                     onClick={() => setIsArtistActive(!isArtistActive)}
-                    className={`h-10 px-4 rounded-xl text-xs font-black uppercase tracking-wider transition-all duration-200 flex items-center gap-1.5 cursor-pointer outline-none shadow-xs border ${
+                    className={`h-8 px-2.5 rounded-lg text-[10px] font-black uppercase tracking-wider transition-all duration-200 flex items-center gap-1 cursor-pointer outline-none shadow-xs border ${
                       isArtistActive
                         ? 'bg-amber-500 hover:bg-amber-600 text-white border-amber-600 ring-2 ring-amber-300'
                         : 'bg-amber-50 hover:bg-amber-100 text-amber-800 border-amber-200'
                     }`}
                   >
                     <span>🎨</span>
-                    <span>Für Artists {isArtistActive ? '(Aktiv)' : ''}</span>
+                    <span>Artist</span>
                   </button>
                 </div>
               </div>
@@ -542,13 +1064,13 @@ export default function App() {
                           return (
                             <div
                               key={item.key}
-                              className="bg-white border border-gray-200 rounded-2xl shadow-xs grid grid-cols-2 overflow-hidden hover:border-indigo-400 hover:shadow-md transition-all relative h-56"
+                              className="bg-white border border-gray-200 rounded-2xl shadow-xs grid grid-cols-2 overflow-hidden hover:border-indigo-400 hover:shadow-md transition-all relative h-[180px]"
                             >
                               {/* Left button: Without Fries */}
                               <button
                                 id={`btn-add-burger-no-pommes-${item.key}`}
                                 onClick={() => addToCart(item.key, item.name, true, false)}
-                                className="p-5 flex flex-col justify-between items-center text-center bg-white hover:bg-slate-50 border-r border-gray-200 active:bg-slate-100 transition-colors cursor-pointer relative group/btn1 h-full outline-none"
+                                className="p-4 flex flex-col justify-between items-center text-center bg-white hover:bg-slate-50 border-r border-gray-200 active:bg-slate-100 transition-colors cursor-pointer relative group/btn1 h-full outline-none"
                               >
                                 {qtyWithoutPommes > 0 && (
                                   <span className="absolute top-3 left-3 bg-slate-100 border border-gray-200 text-slate-700 font-mono font-bold text-[10px] px-1.5 py-0.5 rounded-md flex items-center gap-0.5 shadow-xs pointer-events-none">
@@ -556,8 +1078,15 @@ export default function App() {
                                     <span>{qtyWithoutPommes}x</span>
                                   </span>
                                 )}
-                                <div className="mt-2 flex flex-col items-center">
-                                  <span className="text-4xl block select-none mb-2 transform group-hover/btn1:scale-110 transition-transform">🍔</span>
+                                <div className="mt-1 flex flex-col items-center">
+                                  <div className="flex flex-row items-center justify-center gap-0.5 mb-2 transform group-hover/btn1:scale-110 transition-transform whitespace-nowrap select-none">
+                                    <span className={item.key.toLowerCase().includes('halloumi') ? 'text-2xl' : 'text-4xl'}>
+                                      🍔
+                                    </span>
+                                    {item.key.toLowerCase().includes('halloumi') && (
+                                      <span className="text-2xl">🌱</span>
+                                    )}
+                                  </div>
                                   <h3 className="text-xs font-black text-slate-800 leading-tight">
                                     {item.name}
                                   </h3>
@@ -569,12 +1098,12 @@ export default function App() {
                                   </span>
                                 </div>
                               </button>
-
+                              
                               {/* Right button: With Fries */}
                               <button
                                 id={`btn-add-burger-with-pommes-${item.key}`}
                                 onClick={() => addToCart(item.key, item.name, true, true)}
-                                className="p-5 flex flex-col justify-between items-center text-center bg-indigo-50/20 hover:bg-indigo-50/60 active:bg-indigo-100/65 transition-colors cursor-pointer relative group/btn2 h-full outline-none"
+                                className="p-4 flex flex-col justify-between items-center text-center bg-indigo-50/20 hover:bg-indigo-50/60 active:bg-indigo-100/65 transition-colors cursor-pointer relative group/btn2 h-full outline-none"
                               >
                                 {qtyWithPommes > 0 && (
                                   <span className="absolute top-3 right-3 bg-indigo-600 text-white font-mono font-bold text-[10px] px-1.5 py-0.5 rounded-md flex items-center gap-0.5 shadow-xs pointer-events-none">
@@ -582,10 +1111,17 @@ export default function App() {
                                     <span>{qtyWithPommes}x</span>
                                   </span>
                                 )}
-                                <div className="mt-2 flex flex-col items-center">
-                                  <div className="flex gap-0.5 mb-2 transform group-hover/btn2:scale-110 transition-transform">
-                                    <span className="text-4xl block select-none">🍔</span>
-                                    <span className="text-4xl block select-none">🍟</span>
+                                <div className="mt-1 flex flex-col items-center">
+                                  <div className="flex flex-row items-center justify-center gap-0.5 mb-2 transform group-hover/btn2:scale-110 transition-transform whitespace-nowrap select-none">
+                                    <span className={item.key.toLowerCase().includes('halloumi') ? 'text-2xl' : 'text-4xl'}>
+                                      🍔
+                                    </span>
+                                    {item.key.toLowerCase().includes('halloumi') && (
+                                      <span className="text-2xl">🌱</span>
+                                    )}
+                                    <span className={item.key.toLowerCase().includes('halloumi') ? 'text-2xl' : 'text-4xl'}>
+                                      🍟
+                                    </span>
                                   </div>
                                   <h3 className="text-xs font-black text-indigo-950 leading-tight">
                                     {item.name}
@@ -619,7 +1155,7 @@ export default function App() {
                             key={item.key}
                             id={`btn-add-suppe-${item.key}`}
                             onClick={() => addToCart(item.key, item.name, false)}
-                            className="bg-white border border-gray-200 rounded-2xl p-5 flex flex-col justify-between items-center text-center hover:bg-slate-50 hover:border-indigo-400 hover:shadow-md active:bg-slate-100 transition-all relative h-56 w-full cursor-pointer group outline-none"
+                            className="bg-white border border-gray-200 rounded-2xl p-4 flex flex-col justify-between items-center text-center hover:bg-slate-50 hover:border-indigo-400 hover:shadow-md active:bg-slate-100 transition-all relative h-[180px] w-full cursor-pointer group outline-none"
                           >
                             {/* Quantity Badge */}
                             {quantityInActiveCart > 0 && (
@@ -660,12 +1196,12 @@ export default function App() {
                           .reduce((sum, item) => sum + item.quantity, 0);
 
                         return (
-                          <div className="bg-white border border-gray-200 rounded-2xl shadow-xs grid grid-cols-2 overflow-hidden hover:border-indigo-400 hover:shadow-md transition-all relative h-56">
+                          <div className="bg-white border border-gray-200 rounded-2xl shadow-xs grid grid-cols-2 overflow-hidden hover:border-indigo-400 hover:shadow-md transition-all relative h-[180px]">
                             {/* Left Button: Zitronensorbet (Ohne Alkohol) */}
                             <button
                               id="btn-add-sorbet-standard"
                               onClick={() => addToCart('sorbet', 'Zitronensorbet', false)}
-                              className="p-5 flex flex-col justify-between items-center text-center bg-white hover:bg-slate-50 border-r border-gray-200 active:bg-slate-100 transition-colors cursor-pointer relative group/btn1 h-full outline-none"
+                              className="p-4 flex flex-col justify-between items-center text-center bg-white hover:bg-slate-50 border-r border-gray-200 active:bg-slate-100 transition-colors cursor-pointer relative group/btn1 h-full outline-none"
                             >
                               {qtySorbet > 0 && (
                                 <span className="absolute top-3 left-3 bg-slate-100 border border-gray-200 text-slate-700 font-mono font-bold text-[10px] px-1.5 py-0.5 rounded-md flex items-center gap-0.5 shadow-xs pointer-events-none">
@@ -673,7 +1209,7 @@ export default function App() {
                                   <span>{qtySorbet}x</span>
                                 </span>
                               )}
-                              <div className="mt-2 flex flex-col items-center">
+                              <div className="mt-1 flex flex-col items-center">
                                 <span className="text-4xl block select-none mb-2 transform group-hover/btn1:scale-110 transition-transform">🍋</span>
                                 <h3 className="text-xs font-black text-slate-800 leading-tight">
                                   Zitronensorbet
@@ -691,7 +1227,7 @@ export default function App() {
                             <button
                               id="btn-add-sorbet-vodka"
                               onClick={() => addToCart('sorbetVodka', 'FSK18-Sorbet', false)}
-                              className="p-5 flex flex-col justify-between items-center text-center bg-purple-50/10 hover:bg-purple-50/40 active:bg-purple-100/40 transition-colors cursor-pointer relative group/btn2 h-full outline-none"
+                              className="p-4 flex flex-col justify-between items-center text-center bg-purple-50/10 hover:bg-purple-50/40 active:bg-purple-100/40 transition-colors cursor-pointer relative group/btn2 h-full outline-none"
                             >
                               {qtySorbetVodka > 0 && (
                                 <span className="absolute top-3 right-3 bg-purple-600 text-white font-mono font-bold text-[10px] px-1.5 py-0.5 rounded-md flex items-center gap-0.5 shadow-xs pointer-events-none">
@@ -737,7 +1273,7 @@ export default function App() {
                             key={item.key}
                             id={`btn-add-beilage-${item.key}`}
                             onClick={() => addToCart(item.key, item.name, false)}
-                            className="bg-white border border-gray-200 rounded-2xl p-5 flex flex-col justify-between items-center text-center hover:bg-slate-50 hover:border-indigo-400 hover:shadow-md active:bg-slate-100 transition-all relative h-56 w-full cursor-pointer group outline-none"
+                            className="bg-white border border-gray-200 rounded-2xl p-4 flex flex-col justify-between items-center text-center hover:bg-slate-50 hover:border-indigo-400 hover:shadow-md active:bg-slate-100 transition-all relative h-[180px] w-full cursor-pointer group outline-none"
                           >
                             {/* Quantity Badge */}
                             {quantityInActiveCart > 0 && (
@@ -747,7 +1283,7 @@ export default function App() {
                               </span>
                             )}
 
-                            <div className="mt-2 flex flex-col items-center">
+                            <div className="mt-1 flex flex-col items-center">
                               <span className="text-4xl block select-none mb-2 transform group-hover:scale-110 transition-transform">🍟</span>
                               <h3 className="text-sm font-black text-slate-800 leading-tight">
                                 {item.name}
@@ -770,23 +1306,23 @@ export default function App() {
               </div>
 
               {/* RIGHT COLUMN (Cart Sidebar): Takes full height (top-0 to bottom-0), overlapping/spanning next to Left Column */}
-              <div className="w-[32%] lg:w-[26%] shrink-0 flex flex-col h-full bg-white shadow-2xl relative z-35 overflow-hidden border-l border-slate-200">
+              <div className="w-[34%] lg:w-[30%] xl:w-[26%] shrink-0 flex flex-col h-full bg-white shadow-2xl relative z-35 overflow-hidden border-l border-slate-200">
                 
                 {/* Clean light info list subtitle for professional top alignment */}
-                <div className="px-6 py-5 border-b border-slate-200 bg-slate-50 shrink-0 flex items-center justify-between select-none">
-                  <div className="flex items-center gap-2.5">
-                    <span className="w-2.5 h-2.5 rounded-full bg-indigo-505 bg-indigo-500 animate-pulse" />
-                    <span className="font-extrabold text-sm uppercase tracking-wider text-slate-600">Laufende Bestellung</span>
+                <div className="px-4 py-3.5 border-b border-slate-200 bg-slate-50 shrink-0 flex items-center justify-between select-none">
+                  <div className="flex items-center gap-2">
+                    <span className="w-2.5 h-2.5 rounded-full bg-indigo-500 animate-pulse" />
+                    <span className="font-extrabold text-xs uppercase tracking-wider text-slate-600">Laufende Bestellung</span>
                   </div>
                   {cartTotalItemsCount > 0 && (
-                    <span className="text-xs font-mono font-black bg-indigo-100 text-indigo-700 px-2.5 py-1 rounded-lg">
+                    <span className="text-xs font-mono font-black bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-md">
                       {cartTotalItemsCount} Posten
                     </span>
                   )}
                 </div>
 
                 {/* SCROLLABLE CART ITEM LINES */}
-                <div className="flex-1 overflow-y-auto p-5 space-y-4 bg-slate-50/50">
+                <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-slate-50/50">
                   <AnimatePresence initial={false}>
                     {cart.map((item) => {
                       const singleItemPrice = item.price + (item.hasPommes ? PRICES.pommes : 0);
@@ -799,13 +1335,14 @@ export default function App() {
                           animate={{ opacity: 1, x: 0 }}
                           exit={{ opacity: 0, scale: 0.9, x: -30 }}
                           transition={{ duration: 0.15 }}
-                          className="bg-white border border-slate-200 rounded-2xl p-4 md:p-5 shadow-xs space-y-3.5 relative hover:shadow-md hover:border-slate-300 transition-all duration-150"
+                          className="bg-white border border-slate-200 rounded-xl p-3.5 space-y-3 relative hover:shadow-sm hover:border-slate-300 transition-all duration-150"
                         >
                           <div className="flex items-start justify-between gap-2">
                             <div className="space-y-1">
-                              <h4 className="font-extrabold text-sm md:text-base text-slate-900 flex items-start gap-1 leading-snug">
-                                <span className="select-none text-lg">
+                              <h4 className="font-black text-xs md:text-sm text-slate-900 flex items-start gap-1 leading-snug">
+                                <span className="select-none text-base">
                                   {item.key === 'pommes' || item.key === 'pommesEinzeln' ? '🍟' : 
+                                   item.key.toLowerCase().includes('halloumi') ? '🍔🌱' : 
                                    item.key.toLowerCase().includes('burger') ? '🍔' : 
                                    item.key.toLowerCase().includes('suppe') ? '🍲' : '🍋'}
                                 </span>
@@ -813,55 +1350,55 @@ export default function App() {
                               </h4>
                               <div className="flex flex-wrap gap-1 pt-0.5">
                                 {item.isArtist && (
-                                  <span className="inline-block text-[10px] font-extrabold bg-amber-500 text-white px-2 py-0.5 rounded-lg shadow-2xs select-none">
+                                  <span className="inline-block text-[9px] font-extrabold bg-amber-500 text-white px-1.5 py-0.2 rounded shadow-2xs select-none">
                                     🎨 ARTIST
                                   </span>
                                 )}
                                 {item.hasPommes && (
-                                  <span className="inline-block text-[10px] font-extrabold bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded-lg border border-indigo-150 select-none">
-                                    🍟 INKL. POMMES (+ {formatEuro(PRICES.pommes)})
+                                  <span className="inline-block text-[9px] font-extrabold bg-indigo-50 text-indigo-700 px-1.5 py-0.2 rounded border border-indigo-150 select-none">
+                                    🍟 + {formatEuro(PRICES.pommes)} Pommes
                                   </span>
                                 )}
                               </div>
                             </div>
 
                             {/* Line Price display */}
-                            <span className="font-mono text-[15px] md:text-base font-black text-slate-900 shrink-0 tracking-tight pt-0.5">
+                            <span className="font-mono text-sm font-black text-slate-900 shrink-0 tracking-tight pt-0.5">
                               {formatEuro(lineTotalPrice)}
                             </span>
                           </div>
 
                           {/* Adjustment quantites control & deletion */}
-                          <div className="flex items-center justify-between pt-3 border-t border-slate-100">
-                            <span className="text-xs font-semibold text-slate-400 font-mono">
-                              Einheit: {formatEuro(singleItemPrice)}
+                          <div className="flex items-center justify-between pt-2.5 border-t border-slate-100">
+                            <span className="text-[11px] font-bold text-slate-400 font-mono">
+                              je {formatEuro(singleItemPrice)}
                             </span>
 
-                            <div className="flex items-center space-x-1.5 font-mono">
+                            <div className="flex items-center space-x-1 font-mono">
                               <button
                                 onClick={() => updateCartQuantity(item.id, -1)}
-                                className="w-9 h-9 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl flex items-center justify-center transition active:scale-90 outline-none cursor-pointer border border-slate-200/50"
+                                className="w-7.5 h-7.5 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-lg flex items-center justify-center transition active:scale-90 outline-none cursor-pointer border border-slate-200/50 font-black"
                               >
-                                <Minus className="w-4 h-4 stroke-[2.5]" />
+                                <Minus className="w-3.5 h-3.5 stroke-[3]" />
                               </button>
                               
-                              <span className="font-mono font-black text-base px-3 text-center text-slate-900 select-none min-w-[24px]">
+                              <span className="font-mono font-black text-sm px-1.5 text-center text-slate-900 select-none min-w-[20px]">
                                 {item.quantity}
                               </span>
 
                               <button
                                 onClick={() => updateCartQuantity(item.id, 1)}
-                                className="w-9 h-9 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl flex items-center justify-center transition active:scale-90 outline-none cursor-pointer border border-slate-200/50"
+                                className="w-7.5 h-7.5 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-lg flex items-center justify-center transition active:scale-90 outline-none cursor-pointer border border-slate-200/50 font-black"
                               >
-                                <Plus className="w-4 h-4 stroke-[2.5]" />
+                                <Plus className="w-3.5 h-3.5 stroke-[3]" />
                               </button>
 
                               <button
                                 onClick={() => updateCartQuantity(item.id, -item.quantity)}
-                                className="w-9 h-9 bg-slate-50 hover:bg-red-50 text-slate-450 hover:text-red-655 text-slate-400 hover:text-red-600 rounded-xl flex items-center justify-center transition ml-2 outline-none cursor-pointer border border-slate-200/55"
+                                className="w-7.5 h-7.5 bg-slate-50 hover:bg-red-50 text-slate-400 hover:text-red-600 rounded-lg flex items-center justify-center transition ml-1 outline-none cursor-pointer border border-slate-200/55"
                                 title="Entfernen"
                               >
-                                <Trash2 className="w-4 h-4" />
+                                <Trash2 className="w-3.5 h-3.5" />
                               </button>
                             </div>
                           </div>
@@ -884,29 +1421,37 @@ export default function App() {
                 </div>
 
                 {/* BOTTOM TOTAL SUMMARY BOX + CONFIRMATON SUBMIT BUTTON */}
-                <div className="bg-slate-50 p-6 border-t border-slate-200 shrink-0 space-y-5 shadow-inner relative z-20">
-                  <div className="space-y-1.5 select-none">
+                <div className="bg-slate-50 p-4 border-t border-slate-200 shrink-0 space-y-4 shadow-inner relative z-20">
+                  <div className="space-y-1 select-none">
                     <div className="flex justify-between items-center">
                       <span className="text-xs font-black text-slate-400 uppercase tracking-wider">Gesamtsumme</span>
-                      <span className="text-3xl font-black font-mono text-emerald-600 tracking-tight">
+                      <span className="text-2xl font-black font-mono text-emerald-600 tracking-tight">
                         {formatEuro(cartTotalAmount)}
                       </span>
                     </div>
                   </div>
 
                   {/* Operational primary buttons */}
-                  <div className="flex flex-col gap-2">
+                  <div className="flex flex-col gap-1.5">
                     <button
                       id="submit-order-sales-btn"
                       disabled={cart.length === 0}
-                      onClick={finalizeOrder}
-                      className={`w-full h-16 rounded-2xl font-black tracking-tight text-base text-white flex items-center justify-center gap-2 transition shadow-md duration-150 ${
+                      onClick={() => {
+                        const hasArtist = cart.some((item) => item.isArtist);
+                        if (hasArtist) {
+                          finalizeOrder();
+                        } else {
+                          setAmountPaid('');
+                          setShowChangeModal(true);
+                        }
+                      }}
+                      className={`w-full h-12.5 rounded-xl font-black tracking-tight text-sm text-white flex items-center justify-center gap-1.5 transition shadow-md duration-150 ${
                         cart.length > 0
                           ? 'bg-emerald-600 hover:bg-emerald-700 hover:shadow-lg hover:shadow-emerald-100 active:scale-97 cursor-pointer'
                           : 'bg-slate-300 cursor-not-allowed opacity-50'
                       }`}
                     >
-                      <CheckCircle2 className="w-5.5 h-5.5 stroke-[2.5]" />
+                      <CheckCircle2 className="w-5 h-5 stroke-[2.5]" />
                       <span>Bestellung abschließen</span>
                     </button>
 
@@ -914,7 +1459,7 @@ export default function App() {
                       <button
                         id="clear-active-cart-btn"
                         onClick={clearCart}
-                        className="w-full py-3 text-xs text-slate-400 hover:text-red-600 hover:bg-red-50/50 rounded-xl font-bold transition active:scale-98 cursor-pointer"
+                        className="w-full py-2 text-xs text-slate-400 hover:text-red-650 hover:bg-red-50/50 rounded-lg font-bold transition active:scale-98 cursor-pointer"
                       >
                         Abbrechen & Liste leeren
                       </button>
@@ -933,16 +1478,16 @@ export default function App() {
 
 
       {/* DYNAMIC TOAST FEEDBACK NOTIFICATIONS */}
-      <div className="fixed bottom-6 right-6 z-50 flex flex-col space-y-2 pointer-events-none max-w-sm w-full">
+      <div className="fixed bottom-4 left-4 z-50 flex flex-col space-y-1.5 pointer-events-none max-w-[280px] w-full">
         <AnimatePresence>
           {toasts.map((toast) => (
             <motion.div
               key={toast.id}
-              initial={{ opacity: 0, scale: 0.9, y: 15 }}
+              initial={{ opacity: 0, scale: 0.95, y: 10 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, x: 40, filter: 'blur(3px)' }}
-              transition={{ type: "spring", stiffness: 450, damping: 25 }}
-              className={`p-4 rounded-xl shadow-lg border flex items-start gap-3 pointer-events-auto ${
+              exit={{ opacity: 0, x: -20, filter: 'blur(2px)' }}
+              transition={{ type: "spring", stiffness: 500, damping: 30 }}
+              className={`p-2.5 px-3.5 rounded-lg shadow-md border flex items-center gap-2.5 pointer-events-auto ${
                 toast.type === 'reset'
                   ? 'bg-rose-600 border-rose-700 text-white'
                   : toast.type === 'info'
@@ -950,13 +1495,13 @@ export default function App() {
                     : 'bg-emerald-600 border-emerald-700 text-white'
               }`}
             >
-              <div className="w-6 h-6 rounded-lg bg-white/20 flex items-center justify-center font-bold text-sm shrink-0">
+              <div className="w-5 h-5 rounded bg-white/20 flex items-center justify-center font-bold text-xs shrink-0 select-none">
                 {toast.type === 'reset' ? '⚠️' : toast.type === 'info' ? 'ℹ️' : '✓'}
               </div>
-              <div className="flex-1">
-                <h5 className="font-black text-sm tracking-tight">{toast.message}</h5>
+              <div className="flex-1 min-w-0">
+                <h5 className="font-extrabold text-xs tracking-tight truncate">{toast.message}</h5>
                 {toast.submessage && (
-                  <p className="text-[11px] text-white/80 mt-0.5 leading-tight">{toast.submessage}</p>
+                  <p className="text-[10px] text-white/80 leading-tight truncate mt-0.5">{toast.submessage}</p>
                 )}
               </div>
             </motion.div>
@@ -1046,23 +1591,100 @@ export default function App() {
               <div className="p-8 overflow-y-auto space-y-6 flex-1">
                 
                 {/* Metrics Cards */}
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="bg-emerald-50 rounded-2xl p-5 border border-emerald-100 select-none">
-                    <span className="text-[10px] uppercase font-black tracking-widest text-emerald-800 opacity-60 block">
-                      Gesamtumsatz
-                    </span>
-                    <span className="text-3xl font-black font-mono text-emerald-950 block mt-1">
-                      {formatEuro(permanentTotalRevenue)}
-                    </span>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  
+                  {/* Card 1: Startkassenbestand */}
+                  <div className="bg-slate-50 rounded-2xl p-5 border border-slate-200 flex flex-col justify-between">
+                    <div>
+                      <span className="text-[10.5px] uppercase font-extrabold tracking-wider text-slate-550 block">
+                        🪙 Startkassenbestand
+                      </span>
+                      <div className="flex items-center gap-2 mt-2">
+                        <div className="relative flex-1">
+                          <input
+                            type="number"
+                            step="any"
+                            min="0"
+                            value={startingCash === 0 ? '' : startingCash}
+                            onChange={(e) => {
+                              const val = parseFloat(e.target.value);
+                              setStartingCash(isNaN(val) || val < 0 ? 0 : val);
+                            }}
+                            placeholder="0,00"
+                            className="w-full bg-white border border-slate-300 rounded-xl pl-3 pr-8 py-2 text-lg font-black font-mono text-slate-900 focus:outline-hidden focus:ring-3 focus:ring-indigo-100 focus:border-indigo-500 transition-all font-mono"
+                          />
+                          <span className="absolute right-3 top-1/2 -translate-y-1/2 font-bold text-slate-400 select-none">€</span>
+                        </div>
+                        {startingCash > 0 && (
+                          <button
+                            onClick={() => setStartingCash(0)}
+                            className="p-2 border border-slate-300 hover:border-rose-400 hover:bg-rose-50 text-slate-400 hover:text-rose-600 rounded-xl transition active:scale-95 shrink-0 cursor-pointer"
+                            title="Zurücksetzen"
+                          >
+                            <X className="w-5 h-5" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    {/* Quick Add presets */}
+                    <div className="flex gap-1.5 mt-3 select-none">
+                      {[20, 50, 100, 200].map((preset) => (
+                        <button
+                          key={preset}
+                          onClick={() => setStartingCash((prev) => prev + preset)}
+                          className="flex-1 py-1.5 bg-white hover:bg-slate-100 border border-slate-250 active:scale-95 rounded-lg text-xs font-black text-slate-755 transition cursor-pointer"
+                        >
+                          +{preset}
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                  <div className="bg-indigo-50 rounded-2xl p-5 border border-indigo-100 select-none">
-                    <span className="text-[10px] uppercase font-black tracking-widest text-indigo-800 opacity-60 block">
-                      Posten Verkauft
-                    </span>
-                    <span className="text-3xl font-black font-mono text-indigo-950 block mt-1">
-                      {permanentTotalSold} <span className="text-sm font-medium">Stück</span>
-                    </span>
+
+                  {/* Card 2: Gesamtumsatz */}
+                  <div className="bg-emerald-50 rounded-2xl p-5 border border-emerald-100 flex flex-col justify-between select-none">
+                    <div>
+                      <span className="text-[10.5px] uppercase font-extrabold tracking-wider text-emerald-800 opacity-70 block">
+                        📈 Gesamtumsatz
+                      </span>
+                      <span className="text-3xl font-black font-mono text-emerald-950 block mt-2">
+                        {formatEuro(permanentTotalRevenue)}
+                      </span>
+                    </div>
+                    <div className="text-[11px] text-emerald-700 font-semibold mt-3 bg-emerald-100/30 px-2.5 py-1.5 rounded-lg border border-emerald-100/50">
+                      Umsatz: Standard {formatEuro(regularTotalRevenue)} | Artists {formatEuro(artistTotalRevenue)}
+                    </div>
                   </div>
+
+                  {/* Card 3: Expected final cash balance (Soll-Bestand) */}
+                  <div className="bg-blue-50 rounded-2xl p-5 border border-blue-100 flex flex-col justify-between select-none">
+                    <div>
+                      <span className="text-[10.5px] uppercase font-extrabold tracking-wider text-blue-800 opacity-70 block">
+                        💼 Soll-Kassenbestand (Endbestand)
+                      </span>
+                      <span className="text-3xl font-black font-mono text-blue-950 block mt-2">
+                        {formatEuro(startingCash + permanentTotalRevenue)}
+                      </span>
+                    </div>
+                    <div className="text-[11px] text-blue-700 font-semibold mt-3 bg-blue-100/30 px-2.5 py-1.5 rounded-lg border border-blue-100/50">
+                      Standard-Kasse: {formatEuro(startingCash)} + Live-Umsatz
+                    </div>
+                  </div>
+
+                  {/* Card 4: Posten Verkauft */}
+                  <div className="bg-indigo-50 rounded-2xl p-5 border border-indigo-100 flex flex-col justify-between select-none">
+                    <div>
+                      <span className="text-[10.5px] uppercase font-extrabold tracking-wider text-indigo-800 opacity-70 block">
+                        📊 Posten Verkauft
+                      </span>
+                      <span className="text-3xl font-black font-mono text-indigo-950 block mt-2">
+                        {permanentTotalSold} <span className="text-sm font-medium">Stück</span>
+                      </span>
+                    </div>
+                    <div className="text-[11px] text-indigo-700 font-semibold mt-3 bg-indigo-100/30 px-2.5 py-1.5 rounded-lg border border-indigo-100/50">
+                      Abgeschlossene Bestellungen insgesamt
+                    </div>
+                  </div>
+
                 </div>
 
                 {/* Items detail lists partitioned by Standard and Artist */}
@@ -1086,6 +1708,7 @@ export default function App() {
                               <div className="flex items-center space-x-3 pr-2">
                                 <span className="text-2xl select-none">
                                   {key === 'pommes' || key === 'pommesEinzeln' ? '🍟' : 
+                                   key.toLowerCase().includes('halloumi') ? '🍔🌱' : 
                                    key.toLowerCase().includes('burger') ? '🍔' : 
                                    key.toLowerCase().includes('suppe') ? '🍲' : '🍋'}
                                 </span>
@@ -1143,6 +1766,7 @@ export default function App() {
                               <div className="flex items-center space-x-3 pr-2">
                                 <span className="text-2xl select-none">
                                   {key === 'pommes' || key === 'pommesEinzeln' ? '🍟' : 
+                                   key.toLowerCase().includes('halloumi') ? '🍔🌱' : 
                                    key.toLowerCase().includes('burger') ? '🍔' : 
                                    key.toLowerCase().includes('suppe') ? '🍲' : '🍋'}
                                 </span>
@@ -1183,17 +1807,11 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Empty Alert Box */}
-                {permanentTotalSold === 0 && (
-                  <div className="bg-slate-50 rounded-xl p-6 text-center border-2 border-dashed border-slate-200 text-slate-550 select-none">
-                    <p className="text-xs font-bold">Noch keine Verkäufe registriert.</p>
-                    <p className="text-[11px] text-slate-400 mt-1">Die Liste füllt sich automatisch, sobald Sie Bestellungen links abspeichern.</p>
-                  </div>
-                )}
+
               </div>
 
               {/* Action buttons inside stats */}
-              <div className="bg-slate-50 border-t border-gray-200 px-8 py-5 flex justify-between gap-3 shrink-0">
+              <div className="bg-slate-50 border-t border-gray-200 px-8 py-5 flex items-center justify-between gap-3 shrink-0">
                 {permanentTotalSold > 0 ? (
                   <button
                     id="stats-reset-sales-btn"
@@ -1205,7 +1823,19 @@ export default function App() {
                     <Trash2 className="w-4.5 h-4.5" />
                     Zähler nullen
                   </button>
-                ) : <div />}
+                ) : (
+                  <div className="w-[124px]" />
+                )}
+
+                <button
+                  id="stats-pdf-export-btn"
+                  onClick={exportToPDF}
+                  className="h-12 px-5 bg-indigo-650 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-sm font-extrabold flex items-center justify-center gap-2 transition active:scale-95 outline-none cursor-pointer shadow-md shadow-indigo-100"
+                  title="Bericht als PDF herunterladen"
+                >
+                  <FileDown className="w-4.5 h-4.5 stroke-[2.5]" />
+                  <span>PDF Export</span>
+                </button>
 
                 <button
                   id="stats-close-btn-footer"
@@ -1272,6 +1902,237 @@ export default function App() {
                   Ja, alles zurücksetzen
                 </button>
               </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* OVERLAY F: CHANGE CALCULATOR (RÜCKGELD RECHNER) */}
+      <AnimatePresence>
+        {showChangeModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            
+            {/* Backdrop */}
+            <motion.div 
+              key="change-backdrop"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowChangeModal(false)}
+              className="absolute inset-0 bg-slate-950/70 backdrop-blur-xs cursor-pointer"
+            />
+
+            {/* Modal Box */}
+            <motion.div
+              key="change-modal"
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-white border border-slate-200 w-full max-w-lg rounded-3xl overflow-hidden shadow-2xl relative z-10 flex flex-col max-h-[90vh]"
+            >
+              {/* Header */}
+              <div className="bg-slate-900 px-6 py-4 flex items-center justify-between text-white shrink-0">
+                <div className="flex items-center gap-2">
+                  <span className="text-xl">🪙</span>
+                  <h4 className="font-extrabold text-base tracking-tight text-white m-0">Rückgeld-Rechner</h4>
+                </div>
+                <button 
+                  onClick={() => setShowChangeModal(false)}
+                  className="p-1.5 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-white transition active:scale-95 cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* Scrollable content */}
+              <div className="p-6 overflow-y-auto space-y-5">
+                {/* Visual pricing cards */}
+                <div className="grid grid-cols-2 gap-3 shrink-0">
+                  <div className="bg-slate-50 border border-slate-200 p-4 rounded-2xl select-none">
+                    <span className="text-[10px] uppercase font-black tracking-widest text-slate-400 block">Zu zahlen</span>
+                    <span className="text-2xl font-black font-mono text-slate-900 block mt-1">
+                      {formatEuro(cartTotalAmount)}
+                    </span>
+                  </div>
+                  <div className="bg-indigo-50 border border-indigo-100 p-4 rounded-2xl relative select-none">
+                    <span className="text-[10px] uppercase font-black tracking-widest text-indigo-700 opacity-70 block">Gegeben</span>
+                    <div className="flex items-baseline mt-1">
+                      <span className="text-2xl font-black font-mono text-indigo-950">
+                        {amountPaid ? formatEuro(parseFloat(amountPaid) || 0) : '0,00 €'}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Return amount / change output display */}
+                {(() => {
+                  const paid = parseFloat(amountPaid) || 0;
+                  const diff = paid - cartTotalAmount;
+                  if (amountPaid === '') {
+                    return (
+                      <div className="bg-slate-50 text-slate-500 rounded-2xl p-4 text-center text-xs font-bold border border-slate-200 select-none">
+                        Bitte Betrag eingeben oder Presets unten wählen...
+                      </div>
+                    );
+                  }
+                  if (diff < 0) {
+                    return (
+                      <div className="bg-rose-50 text-rose-800 rounded-2xl p-4 text-center border border-rose-200 flex flex-col items-center select-none">
+                        <span className="text-xs uppercase font-extrabold tracking-wider text-rose-600 block">Es fehlen noch:</span>
+                        <span className="text-2xl font-black font-mono text-rose-700 mt-1">
+                          {formatEuro(Math.abs(diff))}
+                        </span>
+                      </div>
+                    );
+                  }
+                  
+                  // Given amount >= total sum: show change breakdown
+                  const changeBreakdown = getChangeBreakdown(diff);
+                  return (
+                    <div className="space-y-3">
+                      <div className="bg-emerald-50 text-emerald-850 rounded-2xl p-5 text-center border border-emerald-200 flex flex-col items-center relative overflow-hidden select-none">
+                        <span className="text-[10.5px] uppercase font-extrabold tracking-widest text-emerald-600 block">Rückgeld:</span>
+                        <span className="text-4xl font-black font-mono text-emerald-800 mt-1">
+                          {formatEuro(diff)}
+                        </span>
+                      </div>
+
+                      {changeBreakdown.length > 0 && (
+                        <div className="bg-slate-50 rounded-2xl p-4 border border-slate-150 select-none">
+                          <span className="text-[10px] uppercase font-black tracking-widest text-slate-550 block mb-2">💡 Auszahlen als:</span>
+                          <div className="grid grid-cols-2 gap-2">
+                            {changeBreakdown.map((item, idx) => (
+                              <div key={idx} className="bg-white px-3 py-2 rounded-xl border border-slate-250 flex items-center justify-between text-xs">
+                                <span className="font-bold text-slate-705">{item.label}</span>
+                                <span className="font-black font-mono bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded-lg text-xs">
+                                  {item.count}x
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+
+                {/* Keypad and Presets combined layout */}
+                <div className="grid grid-cols-12 gap-4">
+                  {/* Presets and money quick-select - 5 columns */}
+                  <div className="col-span-12 sm:col-span-5 space-y-2 select-none">
+                    <span className="text-[10px] uppercase font-black tracking-widest text-slate-400 block mb-1">Geldscheine</span>
+                    <div className="grid grid-cols-1 gap-2">
+                      <button
+                        onClick={() => setAmountPaid(cartTotalAmount.toFixed(2))}
+                        className="py-2.5 bg-white border border-slate-300 hover:bg-slate-50 font-black text-slate-800 rounded-xl transition active:scale-95 text-xs flex justify-between px-3 cursor-pointer"
+                      >
+                        <span>Passend</span>
+                        <span className="font-mono text-emerald-600">{formatEuro(cartTotalAmount)}</span>
+                      </button>
+                      
+                      {/* Suggest standard euro bills */}
+                      {[5, 10, 20, 50, 100].map((bill) => {
+                        const isSufficient = bill >= cartTotalAmount;
+                        return (
+                          <button
+                            key={bill}
+                            onClick={() => setAmountPaid(bill.toFixed(2))}
+                            className={`py-2.5 border rounded-xl font-black transition active:scale-95 text-xs text-left px-3 flex justify-between cursor-pointer ${
+                              isSufficient 
+                                ? 'bg-indigo-50/50 border-indigo-200 text-indigo-950 hover:bg-indigo-50' 
+                                : 'bg-slate-50 border-slate-200 text-slate-400 opacity-60'
+                            }`}
+                          >
+                            <span>{bill} € Schein</span>
+                            {isSufficient && (
+                              <span className="font-mono text-[10px] text-indigo-600 font-bold">
+                                Rückgeld: {formatEuro(bill - cartTotalAmount)}
+                              </span>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Virtual numeric pad - 7 columns */}
+                  <div className="col-span-12 sm:col-span-7 select-none">
+                    <span className="text-[10px] uppercase font-black tracking-widest text-slate-400 block mb-2">Tastatur</span>
+                    <div className="grid grid-cols-3 gap-2">
+                      {['1', '2', '3', '4', '5', '6', '7', '8', '9', '0', ',', '⌫'].map((key) => {
+                        let clickHandler = () => {};
+                        if (key === '⌫') {
+                          clickHandler = () => setAmountPaid((prev) => prev.slice(0, -1));
+                        } else if (key === ',') {
+                          clickHandler = () => {
+                            setAmountPaid((prev) => {
+                              if (prev.includes('.')) return prev;
+                              return prev + '.';
+                            });
+                          };
+                        } else {
+                          clickHandler = () => {
+                            setAmountPaid((prev) => {
+                              if (prev === '0') return key;
+                              return prev + key;
+                            });
+                          };
+                        }
+
+                        const isBackspace = key === '⌫';
+                        const isComma = key === ',';
+
+                        return (
+                          <button
+                            key={key}
+                            onClick={clickHandler}
+                            className={`h-11 flex items-center justify-center font-black rounded-xl transition active:scale-90 border text-sm cursor-pointer ${
+                              isBackspace 
+                                ? 'bg-rose-50 border-rose-200 text-rose-600 hover:bg-rose-100 text-base'
+                                : isComma 
+                                  ? 'bg-slate-100 border-slate-200 hover:bg-slate-200 text-slate-800'
+                                  : 'bg-white border-slate-250 text-slate-800 hover:bg-slate-50'
+                            }`}
+                          >
+                            {key}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Confirm & Complete Actions inside footer */}
+              <div className="bg-slate-100/50 border-t border-slate-200 px-6 py-4 flex items-center gap-3 shrink-0 select-none">
+                <button
+                  onClick={() => setShowChangeModal(false)}
+                  className="flex-1 py-3 border border-slate-250 bg-white hover:bg-slate-100 text-slate-700 font-extrabold rounded-xl text-xs transition active:scale-95 cursor-pointer text-center"
+                >
+                  Abbrechen
+                </button>
+                <button
+                  disabled={(() => {
+                    const diff = (parseFloat(amountPaid) || 0) - cartTotalAmount;
+                    if (amountPaid !== '' && diff < 0) return true;
+                    return false;
+                  })()}
+                  onClick={finalizeOrder}
+                  className={`flex-1 py-3 text-white font-extrabold rounded-xl text-xs transition shadow-sm active:scale-95 flex items-center justify-center gap-1.5 cursor-pointer ${
+                    (() => {
+                      const diff = (parseFloat(amountPaid) || 0) - cartTotalAmount;
+                      if (amountPaid !== '' && diff < 0) {
+                        return 'bg-slate-300 cursor-not-allowed opacity-50';
+                      }
+                      return 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-50';
+                    })()
+                  }`}
+                >
+                  <CheckCircle2 className="w-4.5 h-4.5" />
+                  Bestellung buchen
+                </button>
+              </div>
+
             </motion.div>
           </div>
         )}
