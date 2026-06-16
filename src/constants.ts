@@ -3,12 +3,11 @@ import { Prices, Category, ItemKey } from './types';
 export const PRICES: Prices = {
   gustoBurger: 9.20,
   doubleGustoBurger: 11.70,
-  halloumiBurger: 9.20,
-  doubleHalloumiBurger: 11.70,
+  halloumiBurger: 10.20,
+  doubleHalloumiBurger: 12.70,
   pommes: 3.00, // Fries to Burger extra (+ 3,00 €)
   pommesEinzeln: 4.00, // Standalone Fries (4,00 €)
   linsensuppe: 6.20,
-  gulaschsuppe: 8.20,
   sorbet: 3.00,
   sorbetVodka: 5.00
 };
@@ -21,7 +20,6 @@ export const ITEM_NAMES: Record<ItemKey, string> = {
   pommes: "Fries (Beilage)",
   pommesEinzeln: "Fries einzeln",
   linsensuppe: "Mercimek Corbasi",
-  gulaschsuppe: "Ungarische Gulyás Suppe",
   sorbet: "Zitronensorbet",
   sorbetVodka: "FSK18-Sorbet"
 };
@@ -45,8 +43,7 @@ export const CATEGORIES: Category[] = [
     icon: '🍲',
     color: 'from-emerald-100 to-teal-100 text-emerald-800 border-emerald-200 hover:bg-emerald-55',
     items: [
-      { key: 'linsensuppe', name: 'Mercimek Çorbası', price: PRICES.linsensuppe, description: 'Klassische rote Linsensuppe nach traditioneller Art mit Zitrone' },
-      { key: 'gulaschsuppe', name: 'Ungarische Gulyás Suppe', price: PRICES.gulaschsuppe, description: 'Herzhafte Gulaschsuppe mit zartem Rindfleisch & Paprika' }
+      { key: 'linsensuppe', name: 'Mercimek Çorbası', price: PRICES.linsensuppe, description: 'Klassische rote Linsensuppe nach traditioneller Art mit Zitrone' }
     ]
   },
   {

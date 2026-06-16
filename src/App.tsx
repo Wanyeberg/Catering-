@@ -14,7 +14,8 @@ import {
   ArrowLeft,
   ShoppingBag,
   Info,
-  FileDown
+  FileDown,
+  History
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { jsPDF } from 'jspdf';
@@ -63,7 +64,6 @@ export default function App() {
       pommes: 0,
       pommesEinzeln: 0,
       linsensuppe: 0,
-      gulaschsuppe: 0,
       sorbet: 0,
       sorbetVodka: 0
     };
@@ -87,7 +87,6 @@ export default function App() {
       pommes: 0,
       pommesEinzeln: 0,
       linsensuppe: 0,
-      gulaschsuppe: 0,
       sorbet: 0,
       sorbetVodka: 0
     };
@@ -157,6 +156,26 @@ export default function App() {
   // Pending confirm states to avoid blocked browser window.confirm inside iframe
   const [pendingCancelOrderId, setPendingCancelOrderId] = useState<string | null>(null);
   const [backButtonConfirmActive, setBackButtonConfirmActive] = useState<boolean>(false);
+
+  // Completed orders history (persisted in localStorage)
+  const [completedOrders, setCompletedOrders] = useState<{ id: string; orderNumber: number; items: CartItem[]; totalAmount: number; timestamp: string; completedAt: string; dateString: string }[]>(() => {
+    const saved = localStorage.getItem('catering_completed_orders_v2');
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {
+        console.error("Error loading completed orders", e);
+      }
+    }
+    return [];
+  });
+
+  useEffect(() => {
+    localStorage.setItem('catering_completed_orders_v2', JSON.stringify(completedOrders));
+  }, [completedOrders]);
+
+  const [showCompletedOrdersModal, setShowCompletedOrdersModal] = useState<boolean>(false);
+  const [pendingCompletedCancelOrderId, setPendingCompletedCancelOrderId] = useState<string | null>(null);
 
   // Toast notifier animation helper
   const addToast = (message: string, submessage?: string, type: 'success' | 'info' | 'reset' = 'success') => {
@@ -352,7 +371,131 @@ export default function App() {
 
     // Remove from active queue
     setActiveOrders((prev) => prev.filter((o) => o.id !== orderId));
+
+    // Record in completed orders history
+    const completedNow = {
+      id: orderToComplete.id,
+      orderNumber: orderToComplete.orderNumber,
+      items: orderToComplete.items,
+      totalAmount: orderToComplete.totalAmount,
+      timestamp: orderToComplete.timestamp,
+      completedAt: new Date().toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' }),
+      dateString: new Date().toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' })
+    };
+    setCompletedOrders((prev) => [completedNow, ...prev]);
+
     addToast("Bestellung abgeschlossen", `Bestellung #${orderToComplete.orderNumber} beendet & gebucht!`, "success");
+  };
+
+  // ADAPT COMPLETED ORDER - Deducts items from stats and moves back to active queue inside the active cart editor
+  const adaptCompletedOrder = (orderId: string) => {
+    const orderToAdapt = completedOrders.find((o) => o.id === orderId);
+    if (!orderToAdapt) return;
+
+    // Deduct items from current session stats
+    setCounts((prevStats) => {
+      const nextStats = { ...prevStats };
+      orderToAdapt.items.forEach((item) => {
+        if (!item.isArtist) {
+          nextStats[item.key] = Math.max(0, (nextStats[item.key] || 0) - item.quantity);
+          if (item.hasPommes) {
+            nextStats.pommes = Math.max(0, (nextStats.pommes || 0) - item.quantity);
+          }
+        }
+      });
+      return nextStats;
+    });
+
+    setArtistCounts((prevStats) => {
+      const nextStats = { ...prevStats };
+      orderToAdapt.items.forEach((item) => {
+        if (item.isArtist) {
+          nextStats[item.key] = Math.max(0, (nextStats[item.key] || 0) - item.quantity);
+          if (item.hasPommes) {
+            nextStats.pommes = Math.max(0, (nextStats.pommes || 0) - item.quantity);
+          }
+        }
+      });
+      return nextStats;
+    });
+
+    // Remove from completed list
+    setCompletedOrders((prev) => prev.filter((o) => o.id !== orderId));
+
+    // Restore to active orders list with original orderNumber & items
+    const restoredOrder = {
+      id: orderToAdapt.id,
+      orderNumber: orderToAdapt.orderNumber,
+      items: orderToAdapt.items,
+      totalAmount: orderToAdapt.totalAmount,
+      timestamp: orderToAdapt.timestamp
+    };
+
+    setActiveOrders((prev) => [...prev, restoredOrder]);
+
+    // Load into editing state
+    setEditingOrderId(restoredOrder.id);
+    setCart([...restoredOrder.items]);
+
+    // Set active category to match first item category of edited order
+    if (restoredOrder.items.length > 0) {
+      const firstKey = restoredOrder.items[0].key;
+      const cat = CATEGORIES.find(c => c.items.some(i => i.key === firstKey));
+      if (cat) {
+        setActiveCategory(cat.id);
+      }
+    }
+
+    setShowCompletedOrdersModal(false);
+    setCurrentScreen('ordering');
+    addToast("Bestellung wieder aktiv", `Bestellung #${restoredOrder.orderNumber} wird bearbeitet und wurde temporär aus Statistik entfernt.`, "info");
+  };
+
+  // CANCEL COMPLETED ORDER - Deducts items from statistics and deletes order history record completely
+  const cancelCompletedOrder = (orderId: string) => {
+    const orderToCancel = completedOrders.find((o) => o.id === orderId);
+    if (!orderToCancel) return;
+
+    setCounts((prevStats) => {
+      const nextStats = { ...prevStats };
+      orderToCancel.items.forEach((item) => {
+        if (!item.isArtist) {
+          nextStats[item.key] = Math.max(0, (nextStats[item.key] || 0) - item.quantity);
+          if (item.hasPommes) {
+            nextStats.pommes = Math.max(0, (nextStats.pommes || 0) - item.quantity);
+          }
+        }
+      });
+      return nextStats;
+    });
+
+    setArtistCounts((prevStats) => {
+      const nextStats = { ...prevStats };
+      orderToCancel.items.forEach((item) => {
+        if (item.isArtist) {
+          nextStats[item.key] = Math.max(0, (nextStats[item.key] || 0) - item.quantity);
+          if (item.hasPommes) {
+            nextStats.pommes = Math.max(0, (nextStats.pommes || 0) - item.quantity);
+          }
+        }
+      });
+      return nextStats;
+    });
+
+    setCompletedOrders((prev) => prev.filter((o) => o.id !== orderId));
+    addToast("Umsatz storniert", `Bestellung #${orderToCancel.orderNumber} gelöscht und Umsätze abgezogen.`, "reset");
+  };
+
+  const handleCancelCompletedClick = (orderId: string) => {
+    if (pendingCompletedCancelOrderId === orderId) {
+      cancelCompletedOrder(orderId);
+      setPendingCompletedCancelOrderId(null);
+    } else {
+      setPendingCompletedCancelOrderId(orderId);
+      setTimeout(() => {
+        setPendingCompletedCancelOrderId((current) => current === orderId ? null : current);
+      }, 4000);
+    }
   };
 
   // EDIT ORDER FROM SLIDER - Loads items into the active cart for modifications
@@ -408,7 +551,6 @@ export default function App() {
       pommes: 0,
       pommesEinzeln: 0,
       linsensuppe: 0,
-      gulaschsuppe: 0,
       sorbet: 0,
       sorbetVodka: 0
     };
@@ -417,6 +559,7 @@ export default function App() {
     setCart([]);
     setIsArtistActive(false);
     setActiveOrders([]); // reset active queue
+    setCompletedOrders([]); // reset completed history
     setNextOrderNumber(1); // reset sequence
     setEditingOrderId(null);
     setShowResetConfirmation(false);
@@ -734,6 +877,15 @@ export default function App() {
           >
             <TrendingUp className="w-4.5 h-4.5 text-emerald-400 stroke-[2.5]" />
             <span>Verkaufsübersicht</span>
+          </button>
+
+          <button 
+            id="global-completed-orders-btn"
+            onClick={() => setShowCompletedOrdersModal(true)}
+            className="px-6 h-12 bg-indigo-55 bg-indigo-50 hover:bg-indigo-100 border border-indigo-150 border-indigo-200 text-indigo-705 text-indigo-700 rounded-xl font-bold tracking-tight shadow-xs active:scale-95 transition-all text-sm flex items-center gap-2 cursor-pointer"
+          >
+            <History className="w-4.5 h-4.5 text-indigo-500 stroke-[2.5]" />
+            <span>Bestellübersicht ({completedOrders.length})</span>
           </button>
         </div>
       </header>
@@ -1540,6 +1692,137 @@ export default function App() {
               </div>
             </motion.div>
           </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* OVERLAY C2: COMPLETED ORDERS OVERVIEW DIALOG */}
+      <AnimatePresence>
+        {showCompletedOrdersModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            {/* Backdrop */}
+            <motion.div 
+              key="completed-orders-backdrop"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowCompletedOrdersModal(false)}
+              className="absolute inset-0 bg-slate-900/60 backdrop-blur-xs cursor-pointer"
+            />
+
+            {/* Modal Body */}
+            <motion.div
+              key="completed-orders-modal"
+              initial={{ scale: 0.95, opacity: 0, y: 15 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.95, opacity: 0, y: 15 }}
+              transition={{ type: "spring", duration: 0.4 }}
+              className="bg-white border border-gray-200 w-full max-w-2xl rounded-3xl overflow-hidden shadow-2xl relative z-10 flex flex-col max-h-[85vh]"
+            >
+              {/* Header */}
+              <div className="bg-slate-50 px-8 py-6 border-b border-gray-200 flex items-center justify-between">
+                <div className="flex items-center space-x-3">
+                  <div className="w-10 h-10 rounded-xl bg-indigo-100 text-indigo-700 flex items-center justify-center">
+                    <History className="w-5 h-5 stroke-[2.2]" />
+                  </div>
+                  <div>
+                    <h3 className="text-xl font-black tracking-tight text-slate-900">Abgeschlossene Bestellungen</h3>
+                    <p className="text-xs text-slate-400">Verwalte und korrigiere bereits gebuchte Umsätze</p>
+                  </div>
+                </div>
+                <button
+                  id="completed-orders-close-btn-x"
+                  onClick={() => setShowCompletedOrdersModal(false)}
+                  className="w-10 h-10 rounded-full hover:bg-gray-100 flex items-center justify-center transition border border-gray-200 text-slate-600 active:scale-90 outline-none cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* Contents Area */}
+              <div className="p-6 md:p-8 overflow-y-auto space-y-4 flex-1">
+                {completedOrders.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center py-12 text-center">
+                    <div className="w-16 h-16 rounded-full bg-slate-150 flex items-center justify-center text-3xl mb-4 select-none">
+                      📭
+                    </div>
+                    <h4 className="text-sm font-extrabold text-slate-800">Keine abgeschlossenen Bestellungen</h4>
+                    <p className="text-xs text-slate-500 max-w-xs mt-1 leading-normal">
+                      Sobald du im Kassen-Bildschirm Bestellungen abschließt und abgleichst, erscheinen sie hier zur nachträglichen Anpassung.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="divide-y divide-gray-100">
+                    {completedOrders.map((order) => {
+                      const isPendingCancel = pendingCompletedCancelOrderId === order.id;
+                      return (
+                        <div key={order.id} className="py-4 first:pt-0 last:pb-0 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 mb-1.5 flex-wrap">
+                              <span className="text-xs font-black text-slate-900">
+                                Bestellung #{order.orderNumber}
+                              </span>
+                              <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 font-bold">
+                                {order.dateString} um {order.completedAt} Uhr
+                              </span>
+                              <span className="text-xs font-mono font-bold px-2 py-0.5 bg-emerald-50 text-emerald-700 border border-emerald-100 rounded">
+                                {formatEuro(order.totalAmount)}
+                              </span>
+                            </div>
+
+                            {/* Item pills */}
+                            <div className="flex flex-wrap gap-1 mt-2">
+                              {order.items.map((item, idx) => (
+                                <span key={idx} className="inline-flex items-center gap-1 px-2 py-1 rounded bg-slate-50 text-slate-700 border border-slate-150 text-[11px] font-medium">
+                                  {item.isArtist ? '🎨' : '👤'} {item.quantity}x {item.name}
+                                  {item.hasPommes && <span className="text-slate-400 font-bold ml-0.5">(+ 🍟)</span>}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+
+                          {/* Action Buttons */}
+                          <div className="flex items-center gap-2 self-start md:self-center shrink-0">
+                            <button
+                              onClick={() => adaptCompletedOrder(order.id)}
+                              className="h-9 px-3 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-150 text-xs font-extrabold rounded-lg flex items-center justify-center gap-1.5 transition active:scale-95 cursor-pointer"
+                              title="Bestellung wieder aktiv schalten, um sie im Warenkorb anzupassen"
+                            >
+                              <RotateCcw className="w-3.5 h-3.5" />
+                              <span>Anpassen</span>
+                            </button>
+
+                            <button
+                              onClick={() => handleCancelCompletedClick(order.id)}
+                              className={`h-9 px-3 text-xs font-extrabold rounded-lg flex items-center justify-center gap-1.5 transition active:scale-95 cursor-pointer ${
+                                isPendingCancel
+                                  ? "bg-rose-600 text-white border border-rose-700 animate-pulse shadow-sm"
+                                  : "bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-100"
+                              }`}
+                              title={isPendingCancel ? "Klicke noch einmal zum Bestätigen" : "Umsatz abziehen und stornieren"}
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                              <span>{isPendingCancel ? "Sicher?" : "Stornieren"}</span>
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Footer */}
+              <div className="bg-slate-50 border-t border-gray-200 px-8 py-5 flex justify-end shrink-0">
+                <button
+                  id="completed-orders-close-btn-footer"
+                  onClick={() => setShowCompletedOrdersModal(false)}
+                  className="px-6 h-11 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-sm font-bold shadow-md active:scale-95 transition cursor-pointer"
+                >
+                  Schließen
+                </button>
+              </div>
+            </motion.div>
+          </div>
         )}
       </AnimatePresence>
 

@@ -6,7 +6,6 @@ export interface Prices {
   pommes: number; // Fries to Burger extra (3€)
   pommesEinzeln: number; // Fries standalone (4€)
   linsensuppe: number;
-  gulaschsuppe: number;
   sorbet: number;
   sorbetVodka: number;
 }
