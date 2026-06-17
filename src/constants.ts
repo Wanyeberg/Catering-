@@ -3,8 +3,8 @@ import { Prices, Category, ItemKey } from './types';
 export const PRICES: Prices = {
   gustoBurger: 9.20,
   doubleGustoBurger: 11.70,
-  halloumiBurger: 10.20,
-  doubleHalloumiBurger: 12.70,
+  halloumiBurger: 9.20,
+  doubleHalloumiBurger: 11.70,
   pommes: 3.00, // Fries to Burger extra (+ 3,00 €)
   pommesEinzeln: 4.00, // Standalone Fries (4,00 €)
   linsensuppe: 6.20,
