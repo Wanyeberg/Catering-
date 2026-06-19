@@ -10,8 +10,8 @@ export const PRICES: Prices = {
   linsensuppe: 6.20,
   sorbet: 3.00,
   sorbetVodka: 5.00,
-  wurstsemmel: 4.00,
-  gustoWurstsemmel: 5.00
+  wurstsemmel: 4.50,
+  gustoWurstsemmel: 5.50
 };
 
 export const ITEM_NAMES: Record<ItemKey, string> = {
