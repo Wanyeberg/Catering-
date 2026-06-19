@@ -9,7 +9,9 @@ export const PRICES: Prices = {
   pommesEinzeln: 4.00, // Standalone Fries (4,00 €)
   linsensuppe: 6.20,
   sorbet: 3.00,
-  sorbetVodka: 5.00
+  sorbetVodka: 5.00,
+  wurstsemmel: 4.00,
+  gustoWurstsemmel: 5.00
 };
 
 export const ITEM_NAMES: Record<ItemKey, string> = {
@@ -21,7 +23,9 @@ export const ITEM_NAMES: Record<ItemKey, string> = {
   pommesEinzeln: "Fries einzeln",
   linsensuppe: "Mercimek Corbasi",
   sorbet: "Zitronensorbet",
-  sorbetVodka: "FSK18-Sorbet"
+  sorbetVodka: "FSK18-Sorbet",
+  wurstsemmel: "Wurstsemmel",
+  gustoWurstsemmel: "Gusto Wurstsemmel"
 };
 
 export const CATEGORIES: Category[] = [
@@ -63,6 +67,16 @@ export const CATEGORIES: Category[] = [
     color: 'from-blue-100 to-cyan-100 text-blue-800 border-blue-200 hover:bg-blue-55',
     items: [
       { key: 'pommesEinzeln', name: 'Fries einzeln', price: PRICES.pommesEinzeln, description: 'Eine große Portion goldgelbe, knusprige Fries frites' }
+    ]
+  },
+  {
+    id: 'wurst',
+    name: 'Wurst',
+    icon: '🌭',
+    color: 'from-orange-100 to-red-100 text-orange-800 border-orange-200 hover:bg-orange-55',
+    items: [
+      { key: 'wurstsemmel', name: 'Wurstsemmel', price: PRICES.wurstsemmel, description: 'Feine Wurstsemmel im frischen Brötchen' },
+      { key: 'gustoWurstsemmel', name: 'Gusto Wurstsemmel', price: PRICES.gustoWurstsemmel, description: 'Spezial Gusto Wurstsemmel mit extra Aufstrich & Gewürzen' }
     ]
   }
 ];

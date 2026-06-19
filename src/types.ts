@@ -8,6 +8,8 @@ export interface Prices {
   linsensuppe: number;
   sorbet: number;
   sorbetVodka: number;
+  wurstsemmel: number;
+  gustoWurstsemmel: number;
 }
 
 export type ItemKey = keyof Prices;
@@ -21,7 +23,7 @@ export interface MenuItem {
 }
 
 export interface Category {
-  id: 'burger' | 'suppen' | 'sorbet' | 'beilagen';
+  id: 'burger' | 'suppen' | 'sorbet' | 'beilagen' | 'wurst';
   name: string;
   icon: string;
   color: string;

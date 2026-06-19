@@ -15,7 +15,9 @@ import {
   ShoppingBag,
   Info,
   FileDown,
-  History
+  History,
+  Coins,
+  FileText
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { jsPDF } from 'jspdf';
@@ -65,7 +67,9 @@ export default function App() {
       pommesEinzeln: 0,
       linsensuppe: 0,
       sorbet: 0,
-      sorbetVodka: 0
+      sorbetVodka: 0,
+      wurstsemmel: 0,
+      gustoWurstsemmel: 0
     };
   });
 
@@ -88,7 +92,9 @@ export default function App() {
       pommesEinzeln: 0,
       linsensuppe: 0,
       sorbet: 0,
-      sorbetVodka: 0
+      sorbetVodka: 0,
+      wurstsemmel: 0,
+      gustoWurstsemmel: 0
     };
   });
 
@@ -177,6 +183,28 @@ export default function App() {
   const [showCompletedOrdersModal, setShowCompletedOrdersModal] = useState<boolean>(false);
   const [pendingCompletedCancelOrderId, setPendingCompletedCancelOrderId] = useState<string | null>(null);
 
+  // States for Stats View Tab switching and Cash Withdrawals (Geldentnahme)
+  const [statsTab, setStatsTab] = useState<'statistik' | 'verkaeufe' | 'kasse'>('statistik');
+  
+  const [cashWithdrawals, setCashWithdrawals] = useState<{ id: string; amount: number; comment: string; timestamp: Date | string; completedAt: string; dateString: string }[]>(() => {
+    const saved = localStorage.getItem('catering_cash_withdrawals_v2');
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {
+        console.error("Error loading cash withdrawals", e);
+      }
+    }
+    return [];
+  });
+
+  useEffect(() => {
+    localStorage.setItem('catering_cash_withdrawals_v2', JSON.stringify(cashWithdrawals));
+  }, [cashWithdrawals]);
+
+  const [withdrawalAmount, setWithdrawalAmount] = useState<string>('');
+  const [withdrawalComment, setWithdrawalComment] = useState<string>('');
+
   // Toast notifier animation helper
   const addToast = (message: string, submessage?: string, type: 'success' | 'info' | 'reset' = 'success') => {
     const id = Date.now().toString() + Math.random().toString(36).substring(2, 5);
@@ -193,7 +221,7 @@ export default function App() {
   };
 
   // Open builder session from start screen
-  const startBuilder = (category: 'burger' | 'suppen' | 'sorbet' | 'beilagen') => {
+  const startBuilder = (category: 'burger' | 'suppen' | 'sorbet' | 'beilagen' | 'wurst') => {
     setActiveCategory(category);
     setCurrentScreen('ordering');
   };
@@ -498,6 +526,39 @@ export default function App() {
     }
   };
 
+  // ADD CASH WITHDRAWAL (Geldentnahme) - Requires a comment
+  const handleAddWithdrawal = (e: React.FormEvent) => {
+    e.preventDefault();
+    const amountNum = parseFloat(withdrawalAmount);
+    if (isNaN(amountNum) || amountNum <= 0) {
+      addToast("Ungültiger Betrag", "Bitte gebe einen gültigen Betrag über 0 € ein.", "info");
+      return;
+    }
+    if (!withdrawalComment.trim()) {
+      addToast("Kommentar erforderlich", "Eine Geldentnahme ist NUR mit Angabe eines Kommentars erlaubt!", "info");
+      return;
+    }
+
+    const newWithdrawal = {
+      id: Date.now().toString(),
+      amount: amountNum,
+      comment: withdrawalComment.trim(),
+      timestamp: new Date().toISOString(),
+      completedAt: new Date().toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' }),
+      dateString: new Date().toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' })
+    };
+
+    setCashWithdrawals((prev) => [newWithdrawal, ...prev]);
+    setWithdrawalAmount('');
+    setWithdrawalComment('');
+    addToast("Geld entnommen", `${formatEuro(amountNum)} wurde mit Kommentar gebucht.`, "success");
+  };
+
+  const handleRemoveWithdrawal = (id: string, amount: number) => {
+    setCashWithdrawals((prev) => prev.filter(w => w.id !== id));
+    addToast("Entnahme storniert", `Die Geldentnahme über ${formatEuro(amount)} wurde gelöscht.`, "reset");
+  };
+
   // EDIT ORDER FROM SLIDER - Loads items into the active cart for modifications
   const editOrder = (orderId: string) => {
     const orderToEdit = activeOrders.find((o) => o.id === orderId);
@@ -552,7 +613,9 @@ export default function App() {
       pommesEinzeln: 0,
       linsensuppe: 0,
       sorbet: 0,
-      sorbetVodka: 0
+      sorbetVodka: 0,
+      wurstsemmel: 0,
+      gustoWurstsemmel: 0
     };
     setCounts(cleared);
     setArtistCounts(cleared);
@@ -560,6 +623,8 @@ export default function App() {
     setIsArtistActive(false);
     setActiveOrders([]); // reset active queue
     setCompletedOrders([]); // reset completed history
+    setCashWithdrawals([]); // reset extra cash withdrawals
+    setStartingCash(0); // reset starting cash
     setNextOrderNumber(1); // reset sequence
     setEditingOrderId(null);
     setShowResetConfirmation(false);
@@ -623,12 +688,14 @@ export default function App() {
       doc.setTextColor(primaryColor[0], primaryColor[1], primaryColor[2]);
       doc.text("KASSEN- UND UMSATZSTATISTIK", 15, 45);
 
+      const totalW = cashWithdrawals.reduce((sum, w) => sum + w.amount, 0);
       const metricsRows = [
         ["Startkassenbestand", formatEuro(startingCash)],
         ["Gesamtumsatz (Standard)", formatEuro(regularTotalRevenue)],
         ["Gesamtumsatz (Artists)", formatEuro(artistTotalRevenue)],
         ["Umsatzerlöse (Alle)", formatEuro(permanentTotalRevenue)],
-        ["Soll-Kassenbestand (Endbestand)", formatEuro(startingCash + permanentTotalRevenue)],
+        ["Geldentnahme (Gesamt)", `-${formatEuro(totalW)}`],
+        ["Soll-Kassenbestand (Endbestand)", formatEuro(startingCash + permanentTotalRevenue - totalW)],
         ["Posten Gesamt Verkauft", `${permanentTotalSold} Stück`]
       ];
 
@@ -764,6 +831,53 @@ export default function App() {
             1: { cellWidth: 35, halign: 'right' },
             2: { cellWidth: 25, halign: 'center' },
             3: { cellWidth: 40, halign: 'right', fontStyle: 'bold' }
+          },
+          margin: { left: 15, right: 15 }
+        });
+      }
+
+      // Check if we have any cash withdrawals, write them into the PDF
+      if (cashWithdrawals.length > 0) {
+        // Safe position check
+        let lastY = (doc as any).lastAutoTable?.finalY ?? currentY;
+        if (lastY > 210) {
+          doc.addPage();
+          lastY = 20;
+        } else {
+          lastY += 12;
+        }
+
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(11);
+        doc.setTextColor(primaryColor[0], primaryColor[1], primaryColor[2]);
+        doc.text("PROTOKOLLIERTE GELDENTNAHMEN", 15, lastY);
+
+        const withdrawalRows = cashWithdrawals.map((w) => [
+          w.comment,
+          `${w.dateString} ${w.completedAt}`,
+          `-${formatEuro(w.amount)}`
+        ]);
+
+        autoTable(doc, {
+          startY: lastY + 3,
+          head: [['Grund / Kommentar', 'Zeitpunkt', 'Betrag']],
+          body: withdrawalRows,
+          theme: 'striped',
+          headStyles: {
+            fillColor: [225, 29, 72], // Rose 600
+            textColor: [255, 255, 255],
+            fontStyle: 'bold',
+            fontSize: 9
+          },
+          bodyStyles: {
+            font: 'helvetica',
+            fontSize: 8.5,
+            textColor: [51, 65, 85]
+          },
+          columnStyles: {
+            0: { cellWidth: 90 },
+            1: { cellWidth: 50, halign: 'center' },
+            2: { cellWidth: 40, halign: 'right', fontStyle: 'bold' }
           },
           margin: { left: 15, right: 15 }
         });
@@ -1022,8 +1136,8 @@ export default function App() {
                 )}
               </div>
 
-              {/* FOUR ICONIC BULK BUTTONS */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-6 w-full max-w-5xl px-4 select-none">
+              {/* FIVE ICONIC BULK BUTTONS */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-6 w-full max-w-6xl px-4 select-none">
                 
                 {/* Burger Starter Button */}
                 <button
@@ -1034,6 +1148,18 @@ export default function App() {
                   <span className="text-6xl select-none transform group-hover:scale-110 transition-transform">🍔</span>
                   <div>
                     <h3 className="text-xl font-black text-slate-800">Burger</h3>
+                  </div>
+                </button>
+
+                {/* Wurst Starter Button */}
+                <button
+                  id="start-btn-wurst"
+                  onClick={() => startBuilder('wurst')}
+                  className="h-64 bg-white hover:bg-slate-50 border border-gray-200 hover:border-indigo-400 rounded-3xl p-6 flex flex-col justify-center items-center text-center gap-4 shadow-xs hover:shadow-xl transition-all duration-300 active:scale-97 cursor-pointer group"
+                >
+                  <span className="text-6xl select-none transform group-hover:scale-110 transition-transform">🌭</span>
+                  <div>
+                    <h3 className="text-xl font-black text-slate-800">Wurst</h3>
                   </div>
                 </button>
 
@@ -1140,6 +1266,18 @@ export default function App() {
                     >
                       <span className="select-none text-base">🍔</span>
                       <span>Burger</span>
+                    </button>
+                    <button
+                      id="pill-wurst"
+                      onClick={() => setActiveCategory('wurst')}
+                      className={`px-5 py-2 rounded-lg text-xs font-black tracking-tight transition flex items-center gap-2 cursor-pointer ${
+                        activeCategory === 'wurst'
+                          ? 'bg-white text-indigo-700 shadow-xs ring-1 ring-slate-200/50'
+                          : 'text-slate-500 hover:text-slate-850'
+                      }`}
+                    >
+                      <span className="select-none text-base">🌭</span>
+                      <span>Wurst</span>
                     </button>
                     <button
                       id="pill-suppen"
@@ -1454,6 +1592,48 @@ export default function App() {
                     </div>
                   )}
 
+                  {/* WURST PANEL */}
+                  {activeCategory === 'wurst' && (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      {CATEGORIES.find(c => c.id === 'wurst')?.items.map((item) => {
+                        const quantityInActiveCart = cart
+                          .filter(cItem => cItem.key === item.key)
+                          .reduce((sum, item) => sum + item.quantity, 0);
+
+                        return (
+                          <button
+                            key={item.key}
+                            id={`btn-add-wurst-${item.key}`}
+                            onClick={() => addToCart(item.key, item.name, false)}
+                            className="bg-white border border-gray-200 rounded-2xl p-4 flex flex-col justify-between items-center text-center hover:bg-slate-50 hover:border-indigo-400 hover:shadow-md active:bg-slate-100 transition-all relative h-[180px] w-full cursor-pointer group outline-none"
+                          >
+                            {/* Quantity Badge */}
+                            {quantityInActiveCart > 0 && (
+                              <span className="absolute top-3 right-3 bg-indigo-600 text-white font-mono font-bold text-[10px] px-1.5 py-0.5 rounded-md flex items-center gap-0.5 shadow-xs pointer-events-none">
+                                <Check className="w-2.5 h-2.5 stroke-[3]" />
+                                <span>{quantityInActiveCart}x</span>
+                              </span>
+                            )}
+
+                            <div className="mt-1 flex flex-col items-center">
+                              <span className="text-4xl block select-none mb-2 transform group-hover:scale-110 transition-transform">🌭</span>
+                              <h3 className="text-sm font-black text-slate-800 leading-tight">
+                                {item.name}
+                              </h3>
+                            </div>
+
+                            <div className="mt-auto w-full">
+                              <span className="text-[9px] font-black tracking-wider text-slate-400 uppercase block mb-0.5">Wurst</span>
+                              <span className="text-sm font-black text-indigo-600 font-mono">
+                                {formatEuro(item.price)}
+                              </span>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+
                 </div>
               </div>
 
@@ -1496,7 +1676,8 @@ export default function App() {
                                   {item.key === 'pommes' || item.key === 'pommesEinzeln' ? '🍟' : 
                                    item.key.toLowerCase().includes('halloumi') ? '🍔🌱' : 
                                    item.key.toLowerCase().includes('burger') ? '🍔' : 
-                                   item.key.toLowerCase().includes('suppe') ? '🍲' : '🍋'}
+                                   item.key.toLowerCase().includes('suppe') ? '🍲' : 
+                                   item.key.toLowerCase().includes('wurst') ? '🌭' : '🍋'}
                                 </span>
                                 <span>{item.name}</span>
                               </h4>
@@ -1870,226 +2051,449 @@ export default function App() {
                 </button>
               </div>
 
+              {/* Tab Selector */}
+              <div className="bg-slate-50 px-8 py-2 border-b border-gray-200 flex items-center justify-start gap-2 select-none shrink-0 overflow-x-auto whitespace-nowrap scrollbar-none">
+                <button
+                  onClick={() => setStatsTab('statistik')}
+                  className={`px-4 py-2 font-bold text-xs flex items-center gap-1.5 rounded-lg transition active:scale-95 cursor-pointer ${
+                    statsTab === 'statistik'
+                      ? 'bg-white text-indigo-700 shadow-xs ring-1 ring-slate-200/50'
+                      : 'text-slate-500 hover:text-slate-850'
+                  }`}
+                >
+                  <TrendingUp className="w-3.5 h-3.5" />
+                  <span>Statistik</span>
+                </button>
+                <button
+                  onClick={() => setStatsTab('verkaeufe')}
+                  className={`px-4 py-2 font-bold text-xs flex items-center gap-1.5 rounded-lg transition active:scale-95 cursor-pointer ${
+                    statsTab === 'verkaeufe'
+                      ? 'bg-white text-indigo-700 shadow-xs ring-1 ring-slate-200/50'
+                      : 'text-slate-500 hover:text-slate-850'
+                  }`}
+                >
+                  <FileText className="w-3.5 h-3.5" />
+                  <span>Verkäufe</span>
+                </button>
+                <button
+                  onClick={() => setStatsTab('kasse')}
+                  className={`px-4 py-2 font-bold text-xs flex items-center gap-1.5 rounded-lg transition active:scale-95 cursor-pointer ${
+                    statsTab === 'kasse'
+                      ? 'bg-white text-indigo-700 shadow-xs ring-1 ring-slate-200/50'
+                      : 'text-slate-500 hover:text-slate-850'
+                  }`}
+                >
+                  <Coins className="w-3.5 h-3.5" />
+                  <span>Kasse / Entnahme</span>
+                </button>
+              </div>
+
               {/* Contents Area */}
               <div className="p-8 overflow-y-auto space-y-6 flex-1">
                 
-                {/* Metrics Cards */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  
-                  {/* Card 1: Startkassenbestand */}
-                  <div className="bg-slate-50 rounded-2xl p-5 border border-slate-200 flex flex-col justify-between">
-                    <div>
-                      <span className="text-[10.5px] uppercase font-extrabold tracking-wider text-slate-550 block">
-                        🪙 Startkassenbestand
-                      </span>
-                      <div className="flex items-center gap-2 mt-2">
-                        <div className="relative flex-1">
-                          <input
-                            type="number"
-                            step="any"
-                            min="0"
-                            value={startingCash === 0 ? '' : startingCash}
-                            onChange={(e) => {
-                              const val = parseFloat(e.target.value);
-                              setStartingCash(isNaN(val) || val < 0 ? 0 : val);
-                            }}
-                            placeholder="0,00"
-                            className="w-full bg-white border border-slate-300 rounded-xl pl-3 pr-8 py-2 text-lg font-black font-mono text-slate-900 focus:outline-hidden focus:ring-3 focus:ring-indigo-100 focus:border-indigo-500 transition-all font-mono"
-                          />
-                          <span className="absolute right-3 top-1/2 -translate-y-1/2 font-bold text-slate-400 select-none">€</span>
-                        </div>
-                        {startingCash > 0 && (
-                          <button
-                            onClick={() => setStartingCash(0)}
-                            className="p-2 border border-slate-300 hover:border-rose-400 hover:bg-rose-50 text-slate-400 hover:text-rose-600 rounded-xl transition active:scale-95 shrink-0 cursor-pointer"
-                            title="Zurücksetzen"
-                          >
-                            <X className="w-5 h-5" />
-                          </button>
+                {statsTab === 'statistik' && (
+                  <div className="space-y-6">
+                    {/* Items detail lists partitioned by Standard and Artist */}
+                    <div className="space-y-6">
+                      {/* Standard-Verkäufe Subsection */}
+                      <div className="space-y-2">
+                        <h4 className="text-xs uppercase font-extrabold tracking-widest text-slate-550 select-none flex items-center justify-between">
+                          <span>📋 Standard-Verkäufe</span>
+                          <span className="font-mono text-xs text-indigo-600 font-bold">Subtotal: {formatEuro(regularTotalRevenue)}</span>
+                        </h4>
+                        {regularTotalSold > 0 ? (
+                          <div className="border border-gray-250 bg-white rounded-2xl overflow-hidden divide-y divide-gray-150">
+                            {Object.entries(counts).map(([key, count]) => {
+                              const typedKey = key as ItemKey;
+                              const price = PRICES[typedKey] || 0;
+                              const itemTotal = (count as number) * price;
+                              if ((count as number) === 0) return null; // hide empty entries
+                              
+                              return (
+                                <div key={`regular-${key}`} className="p-4 flex items-center justify-between hover:bg-slate-50/50 transition">
+                                  <div className="flex items-center space-x-3 pr-2">
+                                    <span className="text-2xl select-none">
+                                      {key === 'pommes' || key === 'pommesEinzeln' ? '🍟' : 
+                                       key.toLowerCase().includes('halloumi') ? '🍔🌱' : 
+                                       key.toLowerCase().includes('burger') ? '🍔' : 
+                                       key.toLowerCase().includes('suppe') ? '🍲' : 
+                                       key.toLowerCase().includes('wurst') ? '🌭' : '🍋'}
+                                    </span>
+                                    <div>
+                                      <span className="font-bold text-slate-900 block text-sm">
+                                        {ITEM_NAMES[typedKey]}
+                                      </span>
+                                      <span className="text-xs text-slate-400 font-mono">
+                                        Einzelpreis: {formatEuro(price)}
+                                      </span>
+                                    </div>
+                                  </div>
+
+                                  <div className="flex items-center space-x-6 text-right select-none">
+                                    <div>
+                                      <span className="text-[10px] text-slate-400 block uppercase font-bold">Verkäufe</span>
+                                      <span className="font-mono font-bold text-slate-900 text-sm">
+                                        {count}x
+                                      </span>
+                                    </div>
+                                    <div className="w-24">
+                                      <span className="text-[10px] text-slate-400 block uppercase font-bold">Summe</span>
+                                      <span className="font-mono font-bold text-slate-900 text-sm">
+                                        {formatEuro(itemTotal)}
+                                      </span>
+                                    </div>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <div className="bg-slate-50/80 rounded-2xl p-4 text-center border border-dashed border-gray-200 text-slate-400 text-xs">
+                            Keine Standard-Verkäufe gebucht
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Artist-Verkäufe Subsection */}
+                      <div className="space-y-2">
+                        <h4 className="text-xs uppercase font-extrabold tracking-widest text-amber-600 select-none flex items-center justify-between">
+                          <span>🎨 Artist-Verkäufe</span>
+                          <span className="font-mono text-xs text-amber-655 font-bold">Subtotal: {formatEuro(artistTotalRevenue)}</span>
+                        </h4>
+                        {artistTotalSold > 0 ? (
+                          <div className="border border-amber-250 bg-amber-50/5 rounded-2xl overflow-hidden divide-y divide-amber-100/50">
+                            {Object.entries(artistCounts).map(([key, count]) => {
+                              const typedKey = key as ItemKey;
+                              const price = PRICES[typedKey] || 0;
+                              const itemTotal = (count as number) * price;
+                              if ((count as number) === 0) return null; // hide empty entries
+                              
+                              return (
+                                <div key={`artist-${key}`} className="p-4 flex items-center justify-between hover:bg-amber-50/10 transition">
+                                  <div className="flex items-center space-x-3 pr-2">
+                                    <span className="text-2xl select-none">
+                                      {key === 'pommes' || key === 'pommesEinzeln' ? '🍟' : 
+                                       key.toLowerCase().includes('halloumi') ? '🍔🌱' : 
+                                       key.toLowerCase().includes('burger') ? '🍔' : 
+                                       key.toLowerCase().includes('suppe') ? '🍲' : 
+                                       key.toLowerCase().includes('wurst') ? '🌭' : '🍋'}
+                                    </span>
+                                    <div>
+                                      <span className="font-bold text-slate-900 block text-sm flex items-center gap-1.5">
+                                        <span>{ITEM_NAMES[typedKey]}</span>
+                                        <span className="text-[9px] font-extrabold bg-amber-100 text-amber-800 rounded px-1.5 py-0.2 select-none">Artist</span>
+                                      </span>
+                                      <span className="text-xs text-slate-400 font-mono">
+                                        Einzelpreis: {formatEuro(price)}
+                                      </span>
+                                    </div>
+                                  </div>
+
+                                  <div className="flex items-center space-x-6 text-right select-none">
+                                    <div>
+                                      <span className="text-[10px] text-amber-600 block uppercase font-bold">Verkäufe</span>
+                                      <span className="font-mono font-bold text-amber-955 text-sm">
+                                        {count}x
+                                      </span>
+                                    </div>
+                                    <div className="w-24">
+                                      <span className="text-[10px] text-amber-600 block uppercase font-bold">Summe</span>
+                                      <span className="font-mono font-bold text-amber-955 text-sm">
+                                        {formatEuro(itemTotal)}
+                                      </span>
+                                    </div>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <div className="bg-amber-50/10 rounded-2xl p-4 text-center border border-dashed border-amber-250/60 text-amber-600/70 text-xs">
+                            Keine Artist-Verkäufe gebucht
+                          </div>
                         )}
                       </div>
                     </div>
-                    {/* Quick Add presets */}
-                    <div className="flex gap-1.5 mt-3 select-none">
-                      {[20, 50, 100, 200].map((preset) => (
-                        <button
-                          key={preset}
-                          onClick={() => setStartingCash((prev) => prev + preset)}
-                          className="flex-1 py-1.5 bg-white hover:bg-slate-100 border border-slate-250 active:scale-95 rounded-lg text-xs font-black text-slate-755 transition cursor-pointer"
-                        >
-                          +{preset}
-                        </button>
-                      ))}
-                    </div>
                   </div>
+                )}
 
-                  {/* Card 2: Gesamtumsatz */}
-                  <div className="bg-emerald-50 rounded-2xl p-5 border border-emerald-100 flex flex-col justify-between select-none">
-                    <div>
-                      <span className="text-[10.5px] uppercase font-extrabold tracking-wider text-emerald-800 opacity-70 block">
-                        📈 Gesamtumsatz
-                      </span>
-                      <span className="text-3xl font-black font-mono text-emerald-950 block mt-2">
-                        {formatEuro(permanentTotalRevenue)}
-                      </span>
-                    </div>
-                    <div className="text-[11px] text-emerald-700 font-semibold mt-3 bg-emerald-100/30 px-2.5 py-1.5 rounded-lg border border-emerald-100/50">
-                      Umsatz: Standard {formatEuro(regularTotalRevenue)} | Artists {formatEuro(artistTotalRevenue)}
-                    </div>
-                  </div>
-
-                  {/* Card 3: Expected final cash balance (Soll-Bestand) */}
-                  <div className="bg-blue-50 rounded-2xl p-5 border border-blue-100 flex flex-col justify-between select-none">
-                    <div>
-                      <span className="text-[10.5px] uppercase font-extrabold tracking-wider text-blue-800 opacity-70 block">
-                        💼 Soll-Kassenbestand (Endbestand)
-                      </span>
-                      <span className="text-3xl font-black font-mono text-blue-950 block mt-2">
-                        {formatEuro(startingCash + permanentTotalRevenue)}
-                      </span>
-                    </div>
-                    <div className="text-[11px] text-blue-700 font-semibold mt-3 bg-blue-100/30 px-2.5 py-1.5 rounded-lg border border-blue-100/50">
-                      Standard-Kasse: {formatEuro(startingCash)} + Live-Umsatz
-                    </div>
-                  </div>
-
-                  {/* Card 4: Posten Verkauft */}
-                  <div className="bg-indigo-50 rounded-2xl p-5 border border-indigo-100 flex flex-col justify-between select-none">
-                    <div>
-                      <span className="text-[10.5px] uppercase font-extrabold tracking-wider text-indigo-800 opacity-70 block">
-                        📊 Posten Verkauft
-                      </span>
-                      <span className="text-3xl font-black font-mono text-indigo-950 block mt-2">
-                        {permanentTotalSold} <span className="text-sm font-medium">Stück</span>
-                      </span>
-                    </div>
-                    <div className="text-[11px] text-indigo-700 font-semibold mt-3 bg-indigo-100/30 px-2.5 py-1.5 rounded-lg border border-indigo-100/50">
-                      Abgeschlossene Bestellungen insgesamt
-                    </div>
-                  </div>
-
-                </div>
-
-                {/* Items detail lists partitioned by Standard and Artist */}
-                <div className="space-y-6">
-                  {/* Standard-Verkäufe Subsection */}
-                  <div className="space-y-2">
-                    <h4 className="text-xs uppercase font-extrabold tracking-widest text-slate-500 select-none flex items-center justify-between">
-                      <span>📋 Standard-Verkäufe</span>
-                      <span className="font-mono text-xs text-indigo-600 font-bold">Subtotal: {formatEuro(regularTotalRevenue)}</span>
+                {statsTab === 'verkaeufe' && (
+                  <div className="space-y-4">
+                    <h4 className="text-xs uppercase font-extrabold tracking-widest text-slate-550 select-none flex items-center justify-between mb-2">
+                      <span>Abgeschlossene Bestellungen</span>
+                      <span className="font-mono text-xs text-indigo-600 font-bold">{completedOrders.length} Gesamt</span>
                     </h4>
-                    {regularTotalSold > 0 ? (
-                      <div className="border border-gray-250 bg-white rounded-2xl overflow-hidden divide-y divide-gray-150">
-                        {Object.entries(counts).map(([key, count]) => {
-                          const typedKey = key as ItemKey;
-                          const price = PRICES[typedKey] || 0;
-                          const itemTotal = (count as number) * price;
-                          if ((count as number) === 0) return null; // hide empty entries for absolute screen elegance
-                          
+                    {completedOrders.length === 0 ? (
+                      <div className="flex flex-col items-center justify-center py-12 text-center bg-slate-50 border border-slate-200 rounded-3xl">
+                        <div className="w-16 h-16 rounded-full bg-slate-150 flex items-center justify-center text-3xl mb-4 select-none">
+                          📭
+                        </div>
+                        <h4 className="text-sm font-extrabold text-slate-800">Keine abgeschlossenen Bestellungen</h4>
+                        <p className="text-xs text-slate-500 max-w-xs mt-1 leading-normal">
+                          Sobald du Bestellungen abschließt, erscheinen sie hier und können korrigiert oder storniert werden.
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="space-y-3">
+                        {completedOrders.map((order) => {
+                          const isPendingCancel = pendingCompletedCancelOrderId === order.id;
                           return (
-                            <div key={`regular-${key}`} className="p-4 flex items-center justify-between hover:bg-slate-50/50 transition">
-                              <div className="flex items-center space-x-3 pr-2">
-                                <span className="text-2xl select-none">
-                                  {key === 'pommes' || key === 'pommesEinzeln' ? '🍟' : 
-                                   key.toLowerCase().includes('halloumi') ? '🍔🌱' : 
-                                   key.toLowerCase().includes('burger') ? '🍔' : 
-                                   key.toLowerCase().includes('suppe') ? '🍲' : '🍋'}
-                                </span>
-                                <div>
-                                  <span className="font-bold text-slate-900 block text-sm">
-                                    {ITEM_NAMES[typedKey]}
+                            <div key={order.id} className="p-4 border border-slate-200 bg-slate-50/50 rounded-2xl flex flex-col md:flex-row md:items-center justify-between gap-4">
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2 mb-1.5 flex-wrap">
+                                  <span className="text-xs font-black text-slate-900">
+                                    Bestellung #{order.orderNumber}
                                   </span>
-                                  <span className="text-xs text-slate-400 font-mono">
-                                    Einzelpreis: {formatEuro(price)}
+                                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 font-bold">
+                                    {order.dateString} um {order.completedAt} Uhr
                                   </span>
+                                  <span className="text-xs font-mono font-bold px-2 py-0.5 bg-emerald-50 text-emerald-700 border border-emerald-100 rounded">
+                                    {formatEuro(order.totalAmount)}
+                                  </span>
+                                </div>
+                                <div className="flex flex-wrap gap-1 mt-2">
+                                  {order.items.map((item, idx) => (
+                                    <span key={idx} className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-[11px] font-medium text-slate-700">
+                                      {item.isArtist ? '🎨' : '👤'} {item.quantity}x {item.name}
+                                      {item.hasPommes && <span className="text-slate-400 font-bold ml-0.5">(+ 🍟)</span>}
+                                    </span>
+                                  ))}
                                 </div>
                               </div>
-
-                              <div className="flex items-center space-x-6 text-right select-none">
-                                <div>
-                                  <span className="text-[10px] text-slate-400 block uppercase font-bold">Verkäufe</span>
-                                  <span className="font-mono font-bold text-slate-900 text-sm">
-                                    {count}x
-                                  </span>
-                                </div>
-                                <div className="w-24">
-                                  <span className="text-[10px] text-slate-400 block uppercase font-bold">Summe</span>
-                                  <span className="font-mono font-bold text-slate-900 text-sm">
-                                    {formatEuro(itemTotal)}
-                                  </span>
-                                </div>
+                              <div className="flex items-center gap-2 shrink-0 self-start md:self-center">
+                                <button
+                                  onClick={() => {
+                                    setShowStats(false);
+                                    adaptCompletedOrder(order.id);
+                                  }}
+                                  className="h-9 px-3 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-150 text-xs font-extrabold rounded-lg flex items-center justify-center gap-1.5 transition active:scale-95 cursor-pointer whitespace-nowrap"
+                                  title="Bestellung korrigieren"
+                                >
+                                  <RotateCcw className="w-3.5 h-3.5" />
+                                  <span>Anpassen</span>
+                                </button>
+                                <button
+                                  onClick={() => handleCancelCompletedClick(order.id)}
+                                  className={`h-9 px-3 text-xs font-extrabold rounded-lg flex items-center justify-center gap-1.5 transition active:scale-95 cursor-pointer whitespace-nowrap ${
+                                    isPendingCancel
+                                      ? "bg-rose-600 text-white border border-rose-700 animate-pulse shadow-sm"
+                                      : "bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-100"
+                                  }`}
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                  <span>{isPendingCancel ? "Sicher?" : "Stornieren"}</span>
+                                </button>
                               </div>
                             </div>
                           );
                         })}
                       </div>
-                    ) : (
-                      <div className="bg-slate-50/80 rounded-2xl p-4 text-center border border-dashed border-gray-200 text-slate-400 text-xs">
-                        Keine Standard-Verkäufe gebucht
-                      </div>
                     )}
                   </div>
+                )}
 
-                  {/* Artist-Verkäufe Subsection */}
-                  <div className="space-y-2">
-                    <h4 className="text-xs uppercase font-extrabold tracking-widest text-amber-600 select-none flex items-center justify-between">
-                      <span>🎨 Artist-Verkäufe</span>
-                      <span className="font-mono text-xs text-amber-650 font-bold">Subtotal: {formatEuro(artistTotalRevenue)}</span>
-                    </h4>
-                    {artistTotalSold > 0 ? (
-                      <div className="border border-amber-250 bg-amber-50/5 rounded-2xl overflow-hidden divide-y divide-amber-100/50">
-                        {Object.entries(artistCounts).map(([key, count]) => {
-                          const typedKey = key as ItemKey;
-                          const price = PRICES[typedKey] || 0;
-                          const itemTotal = (count as number) * price;
-                          if ((count as number) === 0) return null; // hide empty entries
-                          
-                          return (
-                            <div key={`artist-${key}`} className="p-4 flex items-center justify-between hover:bg-amber-50/10 transition">
-                              <div className="flex items-center space-x-3 pr-2">
-                                <span className="text-2xl select-none">
-                                  {key === 'pommes' || key === 'pommesEinzeln' ? '🍟' : 
-                                   key.toLowerCase().includes('halloumi') ? '🍔🌱' : 
-                                   key.toLowerCase().includes('burger') ? '🍔' : 
-                                   key.toLowerCase().includes('suppe') ? '🍲' : '🍋'}
-                                </span>
-                                <div>
-                                  <span className="font-bold text-slate-900 block text-sm flex items-center gap-1.5">
-                                    <span>{ITEM_NAMES[typedKey]}</span>
-                                    <span className="text-[9px] font-extrabold bg-amber-100 text-amber-800 rounded px-1.5 py-0.2 select-none">Artist</span>
-                                  </span>
-                                  <span className="text-xs text-slate-400 font-mono">
-                                    Einzelpreis: {formatEuro(price)}
-                                  </span>
-                                </div>
-                              </div>
-
-                              <div className="flex items-center space-x-6 text-right select-none">
-                                <div>
-                                  <span className="text-[10px] text-amber-600 block uppercase font-bold">Verkäufe</span>
-                                  <span className="font-mono font-bold text-amber-950 text-sm">
-                                    {count}x
-                                  </span>
-                                </div>
-                                <div className="w-24">
-                                  <span className="text-[10px] text-amber-600 block uppercase font-bold">Summe</span>
-                                  <span className="font-mono font-bold text-amber-950 text-sm">
-                                    {formatEuro(itemTotal)}
-                                  </span>
-                                </div>
-                              </div>
+                {statsTab === 'kasse' && (
+                  <div className="space-y-6">
+                    {/* Metrics row */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      {/* Card 1: Startkassenbestand */}
+                      <div className="bg-slate-50 rounded-2xl p-5 border border-slate-200 flex flex-col justify-between">
+                        <div>
+                          <span className="text-[10.5px] uppercase font-extrabold tracking-wider text-slate-550 block">
+                            🪙 Startkassenbestand
+                          </span>
+                          <div className="flex items-center gap-2 mt-2">
+                            <div className="relative flex-1">
+                              <input
+                                type="number"
+                                step="any"
+                                min="0"
+                                value={startingCash === 0 ? '' : startingCash}
+                                onChange={(e) => {
+                                  const val = parseFloat(e.target.value);
+                                  setStartingCash(isNaN(val) || val < 0 ? 0 : val);
+                                }}
+                                placeholder="0,00"
+                                className="w-full bg-white border border-slate-300 rounded-xl pl-3 pr-8 py-2 text-lg font-black font-mono text-slate-900 focus:outline-hidden focus:ring-3 focus:ring-indigo-100 focus:border-indigo-505 transition-all"
+                              />
+                              <span className="absolute right-3 top-1/2 -translate-y-1/2 font-bold text-slate-400 select-none">€</span>
                             </div>
-                          );
-                        })}
+                            {startingCash > 0 && (
+                              <button
+                                onClick={() => setStartingCash(0)}
+                                className="p-2 border border-slate-300 hover:border-rose-400 hover:bg-rose-50 text-slate-400 hover:text-rose-600 rounded-xl transition active:scale-95 shrink-0 cursor-pointer outline-none"
+                                title="Zurücksetzen"
+                              >
+                                <X className="w-5 h-5" />
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                        {/* Quick Presets */}
+                        <div className="flex gap-1.5 mt-3 select-none">
+                          {[20, 50, 100, 200].map((preset) => (
+                            <button
+                              key={preset}
+                              onClick={() => setStartingCash((prev) => prev + preset)}
+                              className="flex-1 py-1.5 bg-white hover:bg-slate-100 border border-slate-250 active:scale-95 rounded-lg text-xs font-black text-slate-700 transition cursor-pointer"
+                            >
+                              +{preset}
+                            </button>
+                          ))}
+                        </div>
                       </div>
-                    ) : (
-                      <div className="bg-amber-50/10 rounded-2xl p-4 text-center border border-dashed border-amber-250/60 text-amber-600/70 text-xs">
-                        Keine Artist-Verkäufe gebucht
-                      </div>
-                    )}
-                  </div>
-                </div>
 
+                      {/* Card 2: Gesamtumsatz */}
+                      <div className="bg-emerald-50 rounded-2xl p-5 border border-emerald-100 flex flex-col justify-between select-none">
+                        <div>
+                          <span className="text-[10.5px] uppercase font-extrabold tracking-wider text-emerald-800 opacity-70 block">
+                            📈 Gesamtumsatz (Alle)
+                          </span>
+                          <span className="text-3xl font-black font-mono text-emerald-955 block mt-2">
+                            {formatEuro(permanentTotalRevenue)}
+                          </span>
+                        </div>
+                        <div className="text-[10px] text-emerald-700 font-extrabold tracking-wider uppercase mt-3 bg-emerald-100/35 px-2.5 py-1.5 rounded-lg border border-emerald-100/50">
+                          Standard: {formatEuro(regularTotalRevenue)} | Artists: {formatEuro(artistTotalRevenue)}
+                        </div>
+                      </div>
+
+                      {/* Card 3: Total Withdrawals */}
+                      <div className="bg-rose-50 rounded-2xl p-5 border border-rose-100 flex flex-col justify-between col-span-1 select-none">
+                        <div>
+                          <span className="text-[10.5px] uppercase font-extrabold tracking-wider text-rose-800 opacity-70 block">
+                            💸 Entnommenes Geld (Gesamt)
+                          </span>
+                          <span className="text-3xl font-black font-mono text-rose-955 block mt-2">
+                            -{formatEuro(cashWithdrawals.reduce((sum, w) => sum + w.amount, 0))}
+                          </span>
+                        </div>
+                        <div className="text-[10px] text-rose-700 font-extrabold tracking-wider uppercase mt-3 bg-rose-100/35 px-2.5 py-1.5 rounded-lg border border-rose-100/50">
+                          {cashWithdrawals.length} Entnahmen verbucht
+                        </div>
+                      </div>
+
+                      {/* Card 4: Soll-Kassenbestand */}
+                      <div className="bg-blue-50 rounded-2xl p-5 border border-blue-100 flex flex-col justify-between col-span-1 select-none">
+                        <div>
+                          <span className="text-[10.5px] uppercase font-extrabold tracking-wider text-blue-800 opacity-70 block">
+                            💼 Soll-Kassenbestand (Ist-Stand)
+                          </span>
+                          <span className="text-3xl font-black font-mono text-blue-955 block mt-2">
+                            {formatEuro(startingCash + permanentTotalRevenue - cashWithdrawals.reduce((sum, w) => sum + w.amount, 0))}
+                          </span>
+                        </div>
+                        <div className="text-[10.5px] text-blue-700 font-extrabold tracking-wider uppercase mt-3 bg-blue-100/35 px-2.5 py-1.5 rounded-lg border border-blue-100/50">
+                          Start + Umsatz - Entnahme
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Geld entnehmen Form */}
+                    <div className="bg-slate-50 border border-slate-200 rounded-3xl p-6">
+                      <h4 className="text-sm font-extrabold text-slate-800 flex items-center gap-1.5 mb-1 bg-white inline-flex px-3 py-1 rounded-xl border border-slate-200">
+                        <span>💸 Geld aus Kasse rausnehmen</span>
+                      </h4>
+                      <p className="text-xs text-slate-400 mb-4 mt-2">
+                        Buche eine Geldentnahme direkt für Ausgänge oder Abschöpfungen. <span className="text-rose-600 font-black">!NUR MIT KOMMENTAR ERLAUBT!</span>
+                      </p>
+
+                      <form onSubmit={handleAddWithdrawal} className="space-y-4">
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                          <div>
+                            <label className="block text-[10px] font-black text-slate-500 uppercase tracking-wider mb-1.5">Geldbetrag *</label>
+                            <div className="relative">
+                              <input
+                                type="number"
+                                step="any"
+                                min="0.01"
+                                required
+                                value={withdrawalAmount}
+                                onChange={(e) => setWithdrawalAmount(e.target.value)}
+                                placeholder="0,00"
+                                className="w-full bg-white border border-slate-300 rounded-xl pl-3 pr-8 py-2 text-sm font-bold font-mono text-slate-900 focus:outline-hidden focus:ring-2 focus:ring-indigo-150"
+                              />
+                              <span className="absolute right-3 top-1/2 -translate-y-1/2 font-bold text-slate-400 select-none text-xs">€</span>
+                            </div>
+                          </div>
+
+                          <div className="md:col-span-2">
+                            <label className="block text-[10px] font-black text-slate-500 uppercase tracking-wider mb-1.5">Grund / Kommentar *</label>
+                            <input
+                              type="text"
+                              required
+                              value={withdrawalComment}
+                              onChange={(e) => setWithdrawalComment(e.target.value)}
+                              placeholder="z.B. Wechselgeld-Tausch, Einkauf Getränke, ect."
+                              className="w-full bg-white border border-slate-300 rounded-xl px-3 py-2 text-sm font-semibold text-slate-900 focus:outline-hidden focus:ring-2 focus:ring-indigo-150"
+                            />
+                          </div>
+                        </div>
+
+                        <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-3 pt-2">
+                          <span className="text-[11px] text-slate-400 font-medium">
+                            * Pflichtfelder
+                          </span>
+                          <button
+                            type="submit"
+                            disabled={!withdrawalComment.trim() || !withdrawalAmount}
+                            className={`h-11 px-5 rounded-xl text-xs font-black tracking-tight flex items-center gap-1.5 transition active:scale-95 cursor-pointer shadow-xs ${
+                              withdrawalComment.trim() && withdrawalAmount
+                                ? 'bg-rose-600 hover:bg-rose-700 text-white'
+                                : 'bg-slate-200 text-slate-400 cursor-not-allowed'
+                            }`}
+                          >
+                            <FileDown className="w-4 h-4 stroke-[2.5]" />
+                            <span>Entnahme buchen</span>
+                          </button>
+                        </div>
+                      </form>
+                    </div>
+
+                    {/* Withdrawal logs history */}
+                    <div className="space-y-2">
+                      <h4 className="text-xs uppercase font-extrabold tracking-widest text-slate-550 select-none flex items-center justify-between">
+                        <span>📋 Protokollierte Entnahmen ({cashWithdrawals.length})</span>
+                      </h4>
+                      {cashWithdrawals.length === 0 ? (
+                        <div className="bg-slate-50/50 rounded-2xl p-6 text-center border border-dashed border-gray-200 text-slate-400 text-xs">
+                          Bisher keine Geldentnahmen registriert
+                        </div>
+                      ) : (
+                        <div className="border border-slate-200 bg-white rounded-2xl overflow-hidden divide-y divide-slate-100">
+                          {cashWithdrawals.map((withdrawal) => (
+                            <div key={withdrawal.id} className="p-4 flex items-center justify-between hover:bg-slate-55 transition">
+                              <div className="flex items-start gap-3">
+                                <span className="text-xl select-none mt-0.5">💸</span>
+                                <div className="min-w-0">
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    <span className="font-bold text-slate-900 text-sm">
+                                      -{formatEuro(withdrawal.amount)}
+                                    </span>
+                                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-100 text-slate-400 font-bold">
+                                      {withdrawal.dateString} um {withdrawal.completedAt} Uhr
+                                    </span>
+                                  </div>
+                                  <span className="text-xs text-slate-555 font-medium mt-1 block break-all">
+                                    Grund: <span className="text-slate-800 font-bold">{withdrawal.comment}</span>
+                                  </span>
+                                </div>
+                              </div>
+                              <button
+                                onClick={() => handleRemoveWithdrawal(withdrawal.id, withdrawal.amount)}
+                                className="p-2 border border-slate-100 hover:border-rose-200 hover:bg-rose-50 text-slate-400 hover:text-rose-600 rounded-xl transition active:scale-90 cursor-pointer shrink-0 outline-none"
+                                title="Rückgängig machen"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                  </div>
+                )}
 
               </div>
 
